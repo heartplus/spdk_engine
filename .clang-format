@@ -1,0 +1,23 @@
+---
+# ref. https://clang.llvm.org/docs/ClangFormatStyleOptions.html
+Language:        Cpp
+
+BasedOnStyle:  Google
+
+ConstructorInitializerIndentWidth: 8
+ContinuationIndentWidth: 8
+PointerAlignment: Left
+IndentWidth:     4
+ColumnLimit:     100
+AccessModifierOffset: -4
+
+Standard:        Cpp11
+TabWidth:        4
+UseTab:          Never
+---
+Language: Proto
+BasedOnStyle:  Google
+IndentWidth:     4
+TabWidth:        4
+UseTab:          Never
+ContinuationIndentWidth: 8
