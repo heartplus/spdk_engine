@@ -18,7 +18,13 @@ Engine::Engine()
           total_data_bytes_(0),
           total_garbage_bytes_(0),
           compaction_enabled_(true),
-          pending_foreground_count_(0) {
+          pending_foreground_count_(0)
+#ifdef WITH_SPDK
+          ,
+          simulation_mode_(true),
+          pending_blob_ops_(0)
+#endif
+{
     std::memset(&superblock_, 0, sizeof(superblock_));
 }
 
@@ -86,6 +92,24 @@ KvError Engine::Close() {
         buffer_manager_->SubmitCurrentBuffer();
     }
 
+#ifdef WITH_SPDK
+    // In SPDK mode, close all open blobs
+    if (!simulation_mode_) {
+        for (auto& file : files_) {
+            if (file->blob_opened && file->blob) {
+                CloseBlobForFile(file.get(), nullptr);
+            }
+        }
+        // Wait for pending blob operations to complete
+        while (pending_blob_ops_ > 0) {
+            if (io_submitter_) {
+                io_submitter_->ProcessCompletions(32);
+            }
+            SpdkEnv::Instance().Poll();
+        }
+    }
+#endif
+
     // Clean up resources
     files_.clear();
     mem_index_.reset();
@@ -127,8 +151,10 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
     auto& env = SpdkEnv::Instance();
     if (env.IsInitialized()) {
         io_submitter_->Initialize(env.GetController(), env.GetNamespace(), env.GetBlobStore());
+        simulation_mode_ = false;
     } else {
         io_submitter_->InitializeSimulation();
+        simulation_mode_ = true;
     }
 #else
     io_submitter_->InitializeSimulation();
@@ -178,7 +204,25 @@ FileInfo* Engine::AllocateNewFile() {
     file->size = 0;
     file->write_offset = sizeof(DataFileHeader);  // Skip header
 
-    // Pre-allocate storage
+#ifdef WITH_SPDK
+    file->blob = nullptr;
+    file->blob_opened = false;
+
+    if (!simulation_mode_) {
+        // In SPDK mode, we'll allocate blob asynchronously
+        // For now, just store the file and allocate blob later
+        FileInfo* ptr = file.get();
+        files_.push_back(std::move(file));
+
+        // Allocate blob for this file
+        AllocateBlobForFile(ptr, [](bool) {
+            // Blob allocation callback - handled asynchronously
+        });
+        return ptr;
+    }
+#endif
+
+    // Simulation mode: Pre-allocate in-memory storage
     file->data.resize(config_.data_file_size);
 
     // Write file header
@@ -428,6 +472,99 @@ KvError Engine::Delete(uint64_t key) {
 
 void Engine::PutAsync(uint64_t key, const void* value, uint32_t value_len, KvCallback cb,
                       void* cb_arg) {
+#ifdef WITH_SPDK
+    if (!simulation_mode_) {
+        if (state_ != EngineState::kReady) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kEngineNotReady));
+            return;
+        }
+
+        if (value_len == 0 || !value) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kInvalidArgument));
+            return;
+        }
+
+        // Calculate entry size
+        size_t header_size = sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t);
+        size_t entry_size = header_size + value_len + sizeof(uint32_t);  // +checksum
+        size_t aligned_size = AlignUp(entry_size, kPageSize);
+
+        // Get active file
+        FileInfo* file = GetActiveFile();
+        if (!file || !file->blob_opened ||
+            file->write_offset + aligned_size > config_.data_file_size) {
+            // Seal current file and create new one
+            if (file) {
+                file->state = FileState::kSealed;
+            }
+            file = AllocateNewFile();
+            if (!file) {
+                if (cb) cb(cb_arg, static_cast<int>(KvError::kNoSpace));
+                return;
+            }
+            active_file_id_ = file->file_id;
+        }
+
+        // Allocate DMA buffer for the entry
+        void* dma_buffer = DmaAllocator::AllocZeroed(aligned_size, kPageSize);
+        if (!dma_buffer) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kInternalError));
+            return;
+        }
+
+        // Allocate sequence number
+        uint32_t seq = mem_index_->AllocateSequence();
+
+        // Build entry in DMA buffer
+        BuildEntryInplace(dma_buffer, key, value, value_len, seq);
+
+        // Prepare index entry
+        MemIndexEntry entry;
+        entry.key = key;
+        entry.file_id = file->file_id;
+        entry.offset_index = static_cast<uint32_t>(file->write_offset / kPageSize);
+        entry.page_count = static_cast<uint16_t>(aligned_size / kPageSize);
+        entry.deleted = 0;
+        entry.sequence = seq;
+
+        uint64_t hash;
+        HashUtil::ComputeHash(key, &hash, &entry.tag);
+
+        uint64_t write_offset = file->write_offset;
+
+        // Update write offset before async operation
+        file->write_offset += aligned_size;
+        file->size = file->write_offset;
+        total_data_bytes_ += aligned_size;
+
+        pending_foreground_count_++;
+
+        // Submit async blob write
+        SubmitBlobWrite(
+                file, write_offset, dma_buffer, static_cast<uint32_t>(aligned_size),
+                [this, key, entry, dma_buffer, cb, cb_arg, aligned_size](int status) {
+                    DmaAllocator::Free(dma_buffer);
+                    pending_foreground_count_--;
+
+                    if (status == 0) {
+                        // Check for existing entry (for garbage tracking)
+                        MemIndexEntry* existing = mem_index_->Find(key);
+                        if (existing) {
+                            uint64_t old_size = existing->page_count * kPageSize;
+                            total_garbage_bytes_ += old_size;
+                        }
+
+                        // Update index on successful write
+                        mem_index_->Upsert(key, entry);
+                    }
+
+                    if (cb) cb(cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
+                });
+        return;
+    }
+#endif
+
+    // Simulation mode: synchronous operation
     KvError err = Put(key, value, value_len);
     if (cb) {
         cb(cb_arg, static_cast<int>(err));
@@ -436,6 +573,96 @@ void Engine::PutAsync(uint64_t key, const void* value, uint32_t value_len, KvCal
 
 void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCallback cb,
                       void* cb_arg) {
+#ifdef WITH_SPDK
+    if (!simulation_mode_) {
+        if (state_ != EngineState::kReady) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kEngineNotReady), 0);
+            return;
+        }
+
+        if (!value_buf || buf_len == 0) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kInvalidArgument), 0);
+            return;
+        }
+
+        // Find in index
+        MemIndexEntry* entry = mem_index_->Find(key);
+        if (!entry) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kKeyNotFound), 0);
+            return;
+        }
+
+        if (entry->is_deleted()) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kKeyNotFound), 0);
+            return;
+        }
+
+        // Get file
+        FileInfo* file = GetFile(entry->file_id);
+        if (!file || !file->IsReadable() || !file->blob_opened) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kIoError), 0);
+            return;
+        }
+
+        // Calculate read size (read the full entry)
+        uint32_t read_pages = entry->page_count;
+        uint32_t read_size = read_pages * kPageSize;
+
+        // Allocate DMA buffer for reading
+        void* dma_buffer = DmaAllocator::Alloc(read_size, kPageSize);
+        if (!dma_buffer) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kInternalError), 0);
+            return;
+        }
+
+        uint64_t offset = entry->offset_index * kPageSize;
+
+        pending_foreground_count_++;
+
+        // Submit async blob read
+        SubmitBlobRead(file, offset, dma_buffer, read_size,
+                       [this, dma_buffer, value_buf, buf_len, cb, cb_arg](int status) {
+                           pending_foreground_count_--;
+
+                           if (status != 0) {
+                               DmaAllocator::Free(dma_buffer);
+                               if (cb) cb(cb_arg, static_cast<int>(KvError::kIoError), 0);
+                               return;
+                           }
+
+                           // Parse entry header
+                           auto* header = static_cast<EntryHeader*>(dma_buffer);
+                           if (!header->is_valid()) {
+                               DmaAllocator::Free(dma_buffer);
+                               if (cb) cb(cb_arg, static_cast<int>(KvError::kCorruption), 0);
+                               return;
+                           }
+
+                           // Get value length
+                           uint32_t value_len = *reinterpret_cast<uint32_t*>(
+                                   static_cast<char*>(dma_buffer) + sizeof(EntryHeader) +
+                                   sizeof(uint64_t));
+
+                           if (value_len > buf_len) {
+                               DmaAllocator::Free(dma_buffer);
+                               if (cb)
+                                   cb(cb_arg, static_cast<int>(KvError::kValueTooLarge), value_len);
+                               return;
+                           }
+
+                           // Copy value to user buffer
+                           void* value_ptr = static_cast<char*>(dma_buffer) + sizeof(EntryHeader) +
+                                             sizeof(uint64_t) + sizeof(uint32_t);
+                           std::memcpy(value_buf, value_ptr, value_len);
+
+                           DmaAllocator::Free(dma_buffer);
+                           if (cb) cb(cb_arg, 0, value_len);
+                       });
+        return;
+    }
+#endif
+
+    // Simulation mode: synchronous operation
     uint32_t actual_len = 0;
     KvError err = Get(key, value_buf, buf_len, &actual_len);
     if (cb) {
@@ -444,6 +671,83 @@ void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCall
 }
 
 void Engine::DeleteAsync(uint64_t key, KvCallback cb, void* cb_arg) {
+#ifdef WITH_SPDK
+    if (!simulation_mode_) {
+        if (state_ != EngineState::kReady) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kEngineNotReady));
+            return;
+        }
+
+        // Check if key exists
+        MemIndexEntry* existing = mem_index_->Find(key);
+        if (!existing) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kKeyNotFound));
+            return;
+        }
+
+        // Calculate tombstone size
+        size_t header_size = sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t);
+        size_t entry_size = header_size + sizeof(uint32_t);  // +checksum
+        size_t aligned_size = AlignUp(entry_size, kPageSize);
+
+        // Get active file
+        FileInfo* file = GetActiveFile();
+        if (!file || !file->blob_opened ||
+            file->write_offset + aligned_size > config_.data_file_size) {
+            if (file) {
+                file->state = FileState::kSealed;
+            }
+            file = AllocateNewFile();
+            if (!file) {
+                if (cb) cb(cb_arg, static_cast<int>(KvError::kNoSpace));
+                return;
+            }
+            active_file_id_ = file->file_id;
+        }
+
+        // Allocate DMA buffer for the tombstone entry
+        void* dma_buffer = DmaAllocator::AllocZeroed(aligned_size, kPageSize);
+        if (!dma_buffer) {
+            if (cb) cb(cb_arg, static_cast<int>(KvError::kInternalError));
+            return;
+        }
+
+        // Allocate sequence number
+        uint32_t seq = mem_index_->AllocateSequence();
+
+        // Build tombstone entry in DMA buffer
+        BuildEntryInplace(dma_buffer, key, nullptr, 0, seq, true);
+
+        // Track garbage from the old entry
+        uint64_t old_size = existing->page_count * kPageSize;
+        uint64_t write_offset = file->write_offset;
+
+        // Update write offset before async operation
+        file->write_offset += aligned_size;
+        file->size = file->write_offset;
+        total_data_bytes_ += aligned_size;
+
+        pending_foreground_count_++;
+
+        // Submit async blob write
+        SubmitBlobWrite(file, write_offset, dma_buffer, static_cast<uint32_t>(aligned_size),
+                        [this, key, dma_buffer, old_size, cb, cb_arg](int status) {
+                            DmaAllocator::Free(dma_buffer);
+                            pending_foreground_count_--;
+
+                            if (status == 0) {
+                                // Remove from index on successful write
+                                mem_index_->Remove(key);
+                                total_garbage_bytes_ += old_size;
+                            }
+
+                            if (cb) cb(cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
+                        });
+        return;
+    }
+#endif
+
+    // Simulation mode: synchronous operation
     KvError err = Delete(key);
     if (cb) {
         cb(cb_arg, static_cast<int>(err));
@@ -534,6 +838,204 @@ uint64_t Engine::GetEntryCount() const { return mem_index_ ? mem_index_->Size() 
 uint64_t Engine::GetTotalDataBytes() const { return total_data_bytes_; }
 
 double Engine::GetIndexLoadFactor() const { return mem_index_ ? mem_index_->LoadFactor() : 0.0; }
+
+#ifdef WITH_SPDK
+
+void Engine::AllocateBlobForFile(FileInfo* file, std::function<void(bool success)> callback) {
+    if (!file || simulation_mode_) {
+        if (callback) callback(false);
+        return;
+    }
+
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized()) {
+        if (callback) callback(false);
+        return;
+    }
+
+    pending_blob_ops_++;
+
+    // Allocate blob with the configured data file size
+    env.AllocateBlob(config_.data_file_size, [this, file, callback](uint64_t blob_id) {
+        pending_blob_ops_--;
+
+        if (blob_id == SPDK_BLOBID_INVALID) {
+            if (callback) callback(false);
+            return;
+        }
+
+        file->blob_id = blob_id;
+
+        // Open the blob after allocation
+        OpenBlobForFile(file, callback);
+    });
+}
+
+void Engine::OpenBlobForFile(FileInfo* file, std::function<void(bool success)> callback) {
+    if (!file || simulation_mode_) {
+        if (callback) callback(false);
+        return;
+    }
+
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized()) {
+        if (callback) callback(false);
+        return;
+    }
+
+    pending_blob_ops_++;
+
+    env.OpenBlob(file->blob_id, [this, file, callback](spdk_blob* blob) {
+        pending_blob_ops_--;
+
+        if (!blob) {
+            if (callback) callback(false);
+            return;
+        }
+
+        file->blob = blob;
+        file->blob_opened = true;
+
+        // Write file header to blob
+        DataFileHeader* header =
+                static_cast<DataFileHeader*>(DmaAllocator::AllocZeroed(kPageSize, kPageSize));
+        if (!header) {
+            if (callback) callback(false);
+            return;
+        }
+
+        header->magic = kDataFileHeaderMagic;
+        header->version = 1;
+        header->file_id = file->file_id;
+        header->state = FileState::kActive;
+        header->create_time = std::chrono::duration_cast<std::chrono::seconds>(
+                                      std::chrono::system_clock::now().time_since_epoch())
+                                      .count();
+        header->checksum = Crc32::Calculate(header, sizeof(*header) - sizeof(header->checksum));
+
+        // Write header to blob
+        SubmitBlobWrite(file, 0, header, kPageSize, [header, callback](int status) {
+            DmaAllocator::Free(header);
+            if (callback) callback(status == 0);
+        });
+    });
+}
+
+void Engine::CloseBlobForFile(FileInfo* file, std::function<void(bool success)> callback) {
+    if (!file || simulation_mode_ || !file->blob_opened || !file->blob) {
+        if (callback) callback(true);  // Not an error if no blob to close
+        return;
+    }
+
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized()) {
+        if (callback) callback(false);
+        return;
+    }
+
+    pending_blob_ops_++;
+
+    env.CloseBlob(file->blob, [this, file, callback](int status) {
+        pending_blob_ops_--;
+        file->blob = nullptr;
+        file->blob_opened = false;
+        if (callback) callback(status == 0);
+    });
+}
+
+void Engine::SubmitBlobWrite(FileInfo* file, uint64_t offset, void* data, uint32_t length,
+                             std::function<void(int status)> callback) {
+    if (!file || !file->blob || !file->blob_opened || simulation_mode_) {
+        if (callback) callback(-1);
+        return;
+    }
+
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized() || !env.GetBlobStore()) {
+        if (callback) callback(-1);
+        return;
+    }
+
+    auto* channel = io_submitter_->GetChannel();
+    if (!channel) {
+        if (callback) callback(-1);
+        return;
+    }
+
+    // Calculate offset and length in io_unit_size
+    uint64_t io_unit_size = spdk_bs_get_io_unit_size(env.GetBlobStore());
+    uint64_t offset_units = offset / io_unit_size;
+    uint64_t length_units = length / io_unit_size;
+
+    // Create completion context
+    struct WriteCtx {
+        std::function<void(int)> callback;
+    };
+    auto* ctx = new WriteCtx{std::move(callback)};
+
+    spdk_blob_io_write(
+            file->blob, channel, data, offset_units, length_units,
+            [](void* arg, int bserrno) {
+                auto* ctx = static_cast<WriteCtx*>(arg);
+                if (ctx->callback) {
+                    ctx->callback(bserrno);
+                }
+                delete ctx;
+            },
+            ctx);
+}
+
+void Engine::SubmitBlobRead(FileInfo* file, uint64_t offset, void* buffer, uint32_t length,
+                            std::function<void(int status)> callback) {
+    if (!file || !file->blob || !file->blob_opened || simulation_mode_) {
+        if (callback) callback(-1);
+        return;
+    }
+
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized() || !env.GetBlobStore()) {
+        if (callback) callback(-1);
+        return;
+    }
+
+    auto* channel = io_submitter_->GetChannel();
+    if (!channel) {
+        if (callback) callback(-1);
+        return;
+    }
+
+    // Calculate offset and length in io_unit_size
+    uint64_t io_unit_size = spdk_bs_get_io_unit_size(env.GetBlobStore());
+    uint64_t offset_units = offset / io_unit_size;
+    uint64_t length_units = length / io_unit_size;
+
+    // Create completion context
+    struct ReadCtx {
+        std::function<void(int)> callback;
+    };
+    auto* ctx = new ReadCtx{std::move(callback)};
+
+    spdk_blob_io_read(
+            file->blob, channel, buffer, offset_units, length_units,
+            [](void* arg, int bserrno) {
+                auto* ctx = static_cast<ReadCtx*>(arg);
+                if (ctx->callback) {
+                    ctx->callback(bserrno);
+                }
+                delete ctx;
+            },
+            ctx);
+}
+
+spdk_blob* Engine::GetBlobForFile(uint16_t file_id) {
+    FileInfo* file = GetFile(file_id);
+    if (!file || !file->blob_opened) {
+        return nullptr;
+    }
+    return file->blob;
+}
+
+#endif  // WITH_SPDK
 
 // C API implementation
 extern "C" {

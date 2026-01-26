@@ -206,10 +206,10 @@ void IoSubmitter::SubmitBatch() {
             // offset and length are in units of io_unit_size (usually 512 bytes)
             uint64_t io_unit_size = spdk_bs_get_io_unit_size(blobstore_);
             uint64_t offset_units = pw.offset / io_unit_size;
-            uint64_t length_units = pw.buffer->GetUsedSize() / io_unit_size;
+            uint64_t length_units = pw.buffer->Used() / io_unit_size;
 
             spdk_blob_io_write(
-                    pw.contexts[0].blob, io_channel_, pw.buffer->GetData(), offset_units,
+                    pw.contexts[0].blob, io_channel_, pw.buffer->Data(), offset_units,
                     length_units,
                     [](void* arg, int bserrno) {
                         auto* ctx = static_cast<WriteCompletionCtx*>(arg);

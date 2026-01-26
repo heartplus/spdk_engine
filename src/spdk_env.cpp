@@ -80,28 +80,38 @@ bool SpdkEnv::Initialize(const SpdkEnvOpts& opts) {
             return false;
         }
 
-        // Load blob store
-        // This is done asynchronously, we use a synchronization mechanism here
-        struct {
-            spdk_blob_store* bs;
-            int rc;
-            bool done;
-        } ctx = {nullptr, 0, false};
-
-        spdk_bs_load(bdev_, nullptr, OnBlobStoreLoadComplete, &ctx);
-
-        // Wait for completion (in real usage, this would be in the event loop)
-        while (!ctx.done) {
-            // Process events
-        }
-
-        if (ctx.rc != 0 || !ctx.bs) {
+        // Create blob store device from bdev
+        struct spdk_bs_dev* bs_dev = nullptr;
+        rc = spdk_bdev_create_bs_dev_ext(opts.bdev_name.c_str(), nullptr, nullptr, &bs_dev);
+        if (rc < 0 || !bs_dev) {
             spdk_bdev_close(bdev_desc_);
             spdk_env_fini();
             return false;
         }
 
-        blobstore_ = ctx.bs;
+        // Load blob store
+        // This is done asynchronously, we use a synchronization mechanism here
+        struct BsLoadCtx {
+            spdk_blob_store* bs;
+            int rc;
+            bool done;
+        };
+        BsLoadCtx load_ctx = {nullptr, 0, false};
+
+        spdk_bs_load(bs_dev, nullptr, OnBlobStoreLoadComplete, &load_ctx);
+
+        // Wait for completion (in real usage, this would be in the event loop)
+        while (!load_ctx.done) {
+            // Process events
+        }
+
+        if (load_ctx.rc != 0 || !load_ctx.bs) {
+            spdk_bdev_close(bdev_desc_);
+            spdk_env_fini();
+            return false;
+        }
+
+        blobstore_ = load_ctx.bs;
         io_channel_ = spdk_bs_alloc_io_channel(blobstore_);
     }
 
@@ -128,17 +138,18 @@ void SpdkEnv::Cleanup() {
 
     if (blobstore_) {
         // Unload blob store
-        struct {
+        struct BsUnloadCtx {
             bool done;
-        } ctx = {false};
+        };
+        BsUnloadCtx unload_ctx = {false};
 
         spdk_bs_unload(blobstore_, [](void* arg, int bserrno) {
-            auto* ctx = static_cast<decltype(&ctx)>(arg);
+            auto* ctx = static_cast<BsUnloadCtx*>(arg);
             (void)bserrno;
             ctx->done = true;
-        }, &ctx);
+        }, &unload_ctx);
 
-        while (!ctx.done) {
+        while (!unload_ctx.done) {
             // Process events
         }
 
@@ -295,12 +306,13 @@ void SpdkEnv::OnBdevInitComplete(void* arg, int rc) {
 }
 
 void SpdkEnv::OnBlobStoreLoadComplete(void* arg, struct spdk_blob_store* bs, int bserrno) {
-    struct Ctx {
+    // BsLoadCtx is defined in Initialize() with same layout
+    struct BsLoadCtx {
         spdk_blob_store* bs;
         int rc;
         bool done;
     };
-    auto* ctx = static_cast<Ctx*>(arg);
+    auto* ctx = static_cast<BsLoadCtx*>(arg);
     ctx->bs = bs;
     ctx->rc = bserrno;
     ctx->done = true;
