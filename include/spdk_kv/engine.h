@@ -5,12 +5,17 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "spdk_kv/append_buffer.h"
+#include "spdk_kv/checkpoint.h"
+#include "spdk_kv/compaction.h"
 #include "spdk_kv/crc32.h"
 #include "spdk_kv/entry.h"
+#include "spdk_kv/io_submitter.h"
 #include "spdk_kv/mem_index.h"
+#include "spdk_kv/spdk_env.h"
 #include "spdk_kv/types.h"
 
 namespace spdk_kv {
@@ -104,6 +109,23 @@ public:
     MemIndex* GetMemIndex() { return mem_index_.get(); }
     const MemIndex* GetMemIndex() const { return mem_index_.get(); }
 
+    // Checkpoint operations
+    void StartCheckpoint(KvCallback cb, void* cb_arg);
+    bool IsCheckpointInProgress() const;
+    void CheckCheckpointTrigger();
+
+    // Compaction operations
+    void ScheduleCompaction(uint16_t file_id);
+    void SetCompactionEnabled(bool enabled) { compaction_enabled_ = enabled; }
+    bool IsCompactionEnabled() const { return compaction_enabled_; }
+    size_t GetGarbageRatio() const;
+
+    // Get pending foreground request count (for compaction priority)
+    size_t GetPendingForegroundCount() const { return pending_foreground_count_; }
+
+    // Get file metadata (for compaction)
+    FileMetadata* GetFileMetadata(uint16_t file_id);
+
 private:
     // Internal helpers
     KvError InitializeNew(const CreateOpts& opts);
@@ -145,6 +167,23 @@ private:
 
     // Superblock (in-memory)
     Superblock superblock_;
+
+    // Checkpoint manager
+    std::unique_ptr<IncrementalCheckpoint> checkpoint_manager_;
+    CheckpointTrigger checkpoint_trigger_;
+
+    // Compaction scheduler
+    std::unique_ptr<CompactionScheduler> compaction_scheduler_;
+    bool compaction_enabled_;
+
+    // File metadata for compaction tracking
+    std::unordered_map<uint16_t, FileMetadata> file_metadata_;
+
+    // IO Submitter for async IO operations
+    std::unique_ptr<IoSubmitter> io_submitter_;
+
+    // Pending async operations (for tracking in-flight requests)
+    size_t pending_foreground_count_;
 };
 
 // C-style API wrapper (for compatibility)

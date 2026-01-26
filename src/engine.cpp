@@ -16,7 +16,9 @@ Engine::Engine()
           active_file_id_(0),
           next_file_id_(0),
           total_data_bytes_(0),
-          total_garbage_bytes_(0) {
+          total_garbage_bytes_(0),
+          compaction_enabled_(true),
+          pending_foreground_count_(0) {
     std::memset(&superblock_, 0, sizeof(superblock_));
 }
 
@@ -88,6 +90,9 @@ KvError Engine::Close() {
     files_.clear();
     mem_index_.reset();
     buffer_manager_.reset();
+    io_submitter_.reset();
+    checkpoint_manager_.reset();
+    compaction_scheduler_.reset();
 
     state_ = EngineState::kClosed;
     return KvError::kSuccess;
@@ -106,6 +111,28 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
     if (!buffer_manager_->Initialize(config_.append_buffer_count, config_.append_buffer_size)) {
         return KvError::kInternalError;
     }
+
+    // Initialize checkpoint manager
+    checkpoint_manager_ =
+            std::make_unique<IncrementalCheckpoint>(mem_index_.get(), mem_index_->Capacity());
+
+    // Initialize compaction scheduler
+    compaction_scheduler_ = std::make_unique<CompactionScheduler>(mem_index_.get());
+    compaction_scheduler_->SetFileMetadata(&file_metadata_);
+
+    // Initialize IO submitter
+    io_submitter_ = std::make_unique<IoSubmitter>();
+#ifdef WITH_SPDK
+    // In SPDK mode, initialize with SPDK resources
+    auto& env = SpdkEnv::Instance();
+    if (env.IsInitialized()) {
+        io_submitter_->Initialize(env.GetController(), env.GetNamespace(), env.GetBlobStore());
+    } else {
+        io_submitter_->InitializeSimulation();
+    }
+#else
+    io_submitter_->InitializeSimulation();
+#endif
 
     // Create first data file
     FileInfo* file = AllocateNewFile();
@@ -424,10 +451,82 @@ void Engine::DeleteAsync(uint64_t key, KvCallback cb, void* cb_arg) {
 }
 
 void Engine::Poll() {
-    // No-op in simulation mode
+    // 1. Process IO completions (this calls spdk_nvme_qpair_process_completions in SPDK mode)
+    if (io_submitter_) {
+        io_submitter_->ProcessCompletions(32);
+    }
+
+    // 2. Process append buffer resets
     if (buffer_manager_) {
         buffer_manager_->CheckPendingResets();
     }
+
+    // 3. Check checkpoint trigger
+    CheckCheckpointTrigger();
+
+    // 4. Poll checkpoint progress
+    if (checkpoint_manager_ && checkpoint_manager_->IsInProgress()) {
+        checkpoint_manager_->Poll();
+    }
+
+    // 5. Process compaction (low priority)
+    if (compaction_enabled_ && compaction_scheduler_) {
+        compaction_scheduler_->SetPendingForegroundCount(GetPendingForegroundCount());
+        compaction_scheduler_->Poll();
+    }
+}
+
+void Engine::StartCheckpoint(KvCallback cb, void* cb_arg) {
+    if (!checkpoint_manager_) {
+        if (cb) cb(cb_arg, -1);
+        return;
+    }
+
+    checkpoint_manager_->SetGlobalSequence(mem_index_->GetGlobalSequence());
+
+    checkpoint_manager_->StartCheckpoint([cb, cb_arg](int status) {
+        if (cb) cb(cb_arg, status);
+    });
+}
+
+bool Engine::IsCheckpointInProgress() const {
+    return checkpoint_manager_ && checkpoint_manager_->IsInProgress();
+}
+
+void Engine::CheckCheckpointTrigger() {
+    if (!checkpoint_manager_ || IsCheckpointInProgress()) {
+        return;
+    }
+
+    // Get current time
+    auto now = std::chrono::steady_clock::now();
+    uint64_t current_time_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+
+    if (checkpoint_trigger_.ShouldCheckpoint(checkpoint_manager_->DirtySegmentCount(),
+                                              current_time_ns)) {
+        StartCheckpoint(nullptr, nullptr);
+        checkpoint_trigger_.Reset(current_time_ns);
+    }
+}
+
+void Engine::ScheduleCompaction(uint16_t file_id) {
+    if (!compaction_scheduler_) return;
+
+    auto it = file_metadata_.find(file_id);
+    if (it != file_metadata_.end()) {
+        compaction_scheduler_->ScheduleCompaction(&it->second);
+    }
+}
+
+size_t Engine::GetGarbageRatio() const {
+    if (total_data_bytes_ == 0) return 0;
+    return (total_garbage_bytes_ * 100) / total_data_bytes_;
+}
+
+FileMetadata* Engine::GetFileMetadata(uint16_t file_id) {
+    auto it = file_metadata_.find(file_id);
+    return (it != file_metadata_.end()) ? &it->second : nullptr;
 }
 
 uint64_t Engine::GetEntryCount() const { return mem_index_ ? mem_index_->Size() : 0; }

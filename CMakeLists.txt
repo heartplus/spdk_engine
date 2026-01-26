@@ -30,6 +30,11 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 # Source files
 set(SPDK_KV_SOURCES
     src/engine.cpp
+    src/checkpoint.cpp
+    src/recovery.cpp
+    src/compaction.cpp
+    src/spdk_env.cpp
+    src/io_submitter.cpp
 )
 
 # Main library
