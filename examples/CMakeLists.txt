@@ -8,7 +8,8 @@ target_link_libraries(basic_example spdk_kv)
 add_executable(async_example async_example.cpp)
 target_link_libraries(async_example spdk_kv)
 
-# C API example
+# C API example (compiled as C++ due to header dependencies)
+set_source_files_properties(c_api_example.c PROPERTIES LANGUAGE CXX)
 add_executable(c_api_example c_api_example.c)
 target_link_libraries(c_api_example spdk_kv)
 

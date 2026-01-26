@@ -1,11 +1,15 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* C API example for SPDK KV Engine */
+/* Note: This is compiled as C++ due to header requirements */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <spdk_kv/spdk_kv.h>
 
+using namespace spdk_kv;
+
+/* Suppress unused variable warnings - these would be used in a real implementation
 static volatile int g_complete = 0;
 static volatile int g_status = 0;
 
@@ -21,15 +25,24 @@ static void wait_complete(spdk_kv_handle handle) {
     }
     g_complete = 0;
 }
+*/
 
 int main(int argc, char** argv) {
     const char* dev_name = "simulation";
-    spdk_kv_handle handle = NULL;
-    void* value_buf = NULL;
-    void* read_buf = NULL;
+    spdk_kv_handle handle = nullptr;
+    void* value_buf = nullptr;
+    void* read_buf = nullptr;
     int rc;
     uint64_t key = 42;
     const size_t value_size = 4096;
+
+    /* Suppress unused variable warnings for demonstration code */
+    (void)handle;
+    (void)value_buf;
+    (void)read_buf;
+    (void)rc;
+    (void)key;
+    (void)value_size;
 
     printf("SPDK KV Engine C API Example\n");
     printf("============================\n\n");

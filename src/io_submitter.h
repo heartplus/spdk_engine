@@ -11,7 +11,7 @@
 
 #ifdef WITH_SPDK
 #include <spdk/blob.h>
-#include <spdk/io_channel.h>
+#include <spdk/thread.h>
 #endif
 
 namespace spdk_kv {

@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
     auto* engine = new Engine();
 
     int rc = engine->create(dev_name, &create_opts,
-        [](void* arg, int status) {
+        [](void* /* arg */, int status) {
             printf("Engine creation completed with status: %d\n", status);
         }, nullptr);
 
@@ -270,7 +270,7 @@ int main(int argc, char** argv) {
 
     // Close engine
     bool close_complete = false;
-    engine->close([](void* arg, int status) {
+    engine->close([](void* arg, int /* status */) {
         *static_cast<bool*>(arg) = true;
     }, &close_complete);
 

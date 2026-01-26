@@ -71,7 +71,6 @@ int main(int argc, char** argv) {
 
     auto* engine = new Engine();
 
-    bool create_complete = false;
     int create_status = 0;
     int rc = engine->create(dev_name, &create_opts,
         [](void* arg, int status) {
@@ -214,7 +213,7 @@ int main(int argc, char** argv) {
     }
 
     bool close_complete = false;
-    engine->close([](void* arg, int status) {
+    engine->close([](void* arg, int /* status */) {
         *static_cast<bool*>(arg) = true;
     }, &close_complete);
 

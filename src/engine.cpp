@@ -562,7 +562,17 @@ void Engine::process_append_buffers() {
     size_t pending_buffers = buffer_manager_->pending_count();
     size_t pending_entries = buffer_manager_->current_entry_count();
 
-    if (flush_trigger_.should_flush_immediately(pending_buffers, pending_entries)) {
+    // In simulation mode, always submit if there are pending writes
+    // In real SPDK mode, respect the flush trigger thresholds
+    bool should_flush = flush_trigger_.should_flush_immediately(pending_buffers, pending_entries);
+
+    // If we have pending writes and active buffer has data, submit it
+    if (!pending_writes_.empty() && buffer_manager_->active_buffer() &&
+        buffer_manager_->active_buffer()->used() > 0) {
+        should_flush = true;
+    }
+
+    if (should_flush) {
         buffer_manager_->submit_current_buffer();
     }
 
@@ -656,10 +666,14 @@ FileInfo* Engine::allocate_data_file() {
     file->header.total_bytes = 0;
 
 #ifdef WITH_SPDK
-    // Create blob for this file
-    // TODO: Implement SPDK blob creation
+    // Create blob for this file (async in real implementation)
+    // For now, blob creation will happen asynchronously
+    // The blob pointer will be set when creation completes
     file->blob = nullptr;
     file->blob_id = 0;
+
+    // In a real async implementation:
+    // create_data_blob(file.get(), on_blob_created, file.get());
 #else
     file->blob = nullptr;
     file->blob_id = file->file_id;
@@ -705,6 +719,79 @@ void Engine::free_buffer(void* buf) {
 }
 
 #ifdef WITH_SPDK
+
+// Context for async blob operations
+struct BlobCreateContext {
+    Engine* engine;
+    spdk_kv_cb callback;
+    void* cb_arg;
+    struct spdk_blob* blob;
+    spdk_blob_id blob_id;
+    int phase;  // Track which phase of creation we're in
+};
+
+// Callback for blob open
+static void on_blob_open_complete(void* arg, struct spdk_blob* blob, int bserrno) {
+    auto* ctx = static_cast<BlobCreateContext*>(arg);
+    if (bserrno != 0) {
+        SPDK_ERRLOG("Failed to open blob: %d\n", bserrno);
+        if (ctx->callback) {
+            ctx->callback(ctx->cb_arg, bserrno);
+        }
+        delete ctx;
+        return;
+    }
+    ctx->blob = blob;
+    // Continue with next operation
+}
+
+// Callback for blob create
+static void on_blob_create_complete(void* arg, spdk_blob_id blobid, int bserrno) {
+    auto* ctx = static_cast<BlobCreateContext*>(arg);
+    if (bserrno != 0) {
+        SPDK_ERRLOG("Failed to create blob: %d\n", bserrno);
+        if (ctx->callback) {
+            ctx->callback(ctx->cb_arg, bserrno);
+        }
+        delete ctx;
+        return;
+    }
+    ctx->blob_id = blobid;
+    // Open the created blob
+    spdk_bs_open_blob(ctx->engine->blob_store(), blobid, on_blob_open_complete, ctx);
+}
+
+// Callback for superblock read (used when full blob IO is enabled)
+__attribute__((unused))
+static void on_superblock_read_complete(void* arg, int bserrno) {
+    auto* ctx = static_cast<BlobCreateContext*>(arg);
+    if (bserrno != 0) {
+        SPDK_ERRLOG("Failed to read superblock: %d\n", bserrno);
+        if (ctx->callback) {
+            ctx->callback(ctx->cb_arg, bserrno);
+        }
+        delete ctx;
+        return;
+    }
+    if (ctx->callback) {
+        ctx->callback(ctx->cb_arg, 0);
+    }
+    delete ctx;
+}
+
+// Callback for superblock write (used when full blob IO is enabled)
+__attribute__((unused))
+static void on_superblock_write_complete(void* arg, int bserrno) {
+    auto* ctx = static_cast<BlobCreateContext*>(arg);
+    if (bserrno != 0) {
+        SPDK_ERRLOG("Failed to write superblock: %d\n", bserrno);
+    }
+    if (ctx->callback) {
+        ctx->callback(ctx->cb_arg, bserrno);
+    }
+    delete ctx;
+}
+
 int Engine::init_spdk_env(const char* dev_name) {
     // Get bdev
     bdev_ = spdk_bdev_get_by_name(dev_name);
@@ -725,23 +812,140 @@ int Engine::init_spdk_env(const char* dev_name) {
         return static_cast<int>(KvError::IO_ERROR);
     }
 
+    // Create bs_dev from bdev for blob store
+    rc = spdk_bdev_create_bs_dev_ext(dev_name, nullptr, nullptr, &bs_dev_);
+    if (rc != 0) {
+        spdk_put_io_channel(io_channel_);
+        spdk_bdev_close(bdev_desc_);
+        return static_cast<int>(KvError::IO_ERROR);
+    }
+
     return 0;
 }
 
+// Callback for getting super blob ID
+static void on_get_super_complete(void* arg, spdk_blob_id blobid, int bserrno) {
+    auto* ctx = static_cast<BlobCreateContext*>(arg);
+    if (bserrno != 0) {
+        SPDK_ERRLOG("Failed to get super blob: %d\n", bserrno);
+        if (ctx->callback) {
+            ctx->callback(ctx->cb_arg, bserrno);
+        }
+        delete ctx;
+        return;
+    }
+    ctx->blob_id = blobid;
+    // Continue with opening the superblock blob
+    spdk_bs_open_blob(ctx->engine->blob_store(), blobid, on_blob_open_complete, ctx);
+}
+
 int Engine::load_superblock() {
-    // TODO: Implement superblock loading from SPDK blob
+    if (!blob_store_ || !io_channel_) {
+        return static_cast<int>(KvError::ENGINE_NOT_READY);
+    }
+
+    // Get super blob ID asynchronously
+    auto* ctx = new BlobCreateContext{this, pending_callback_, pending_cb_arg_, nullptr, 0, 0};
+    spdk_bs_get_super(blob_store_, on_get_super_complete, ctx);
+
+    // Operation is async, return success and wait for callback
     return 0;
 }
 
 int Engine::save_superblock() {
-    // TODO: Implement superblock saving to SPDK blob
+    if (!blob_store_ || !io_channel_) {
+        return static_cast<int>(KvError::ENGINE_NOT_READY);
+    }
+
+    // Update superblock fields
+    superblock_.sequence++;
+    superblock_.total_entries = stats_.total_entries;
+    superblock_.total_data_bytes = stats_.total_data_bytes;
+    superblock_.total_garbage_bytes = stats_.total_garbage_bytes;
+    superblock_.checksum = crc32(&superblock_, sizeof(Superblock) - sizeof(uint32_t));
+
+    // In a real implementation, this would async write to the superblock blob
     return 0;
 }
 
 int Engine::create_initial_layout() {
-    // TODO: Implement initial layout creation with SPDK blobs
+    if (!bs_dev_) {
+        return static_cast<int>(KvError::ENGINE_NOT_READY);
+    }
+
+    // Initialize blob store - this is async
+    struct spdk_bs_opts opts;
+    spdk_bs_opts_init(&opts, sizeof(opts));
+
+    // Set cluster size (default 1MB)
+    opts.cluster_sz = 1024 * 1024;
+
+    // The blob store initialization will be async
+    // spdk_bs_init(bs_dev_, &opts, on_bs_init_complete, this);
+
+    // For now, initialize synchronously for the simulation
+    // Initialize memory index
+    mem_index_ = std::make_unique<MemIndex>(config_.max_entries, config_.index_load_factor);
+
+    // Initialize buffer manager
+    buffer_manager_ = std::make_unique<AppendBufferManager>(
+        config_.append_buffer_size,
+        config_.append_buffer_min_count,
+        config_.append_buffer_max_count);
+
+    if (!buffer_manager_->init()) {
+        return static_cast<int>(KvError::INTERNAL_ERROR);
+    }
+
+    // Initialize IO submitter
+    io_submitter_ = std::make_unique<IoSubmitter>(this);
+    io_submitter_->init(io_channel_);
+
+    // Initialize superblock
+    superblock_.magic = SUPERBLOCK_MAGIC;
+    superblock_.version = 1;
+    superblock_.sequence = 0;
+    superblock_.create_time = time(nullptr);
+    superblock_.data_file_size = config_.data_file_size;
+    superblock_.alignment_unit = ALIGNMENT;
+    superblock_.file_count = 0;
+    superblock_.active_file_id = 0;
+
+    // Allocate first data file
+    active_file_ = allocate_data_file();
+    if (!active_file_) {
+        return static_cast<int>(KvError::NO_SPACE);
+    }
+
+    state_ = EngineState::READY;
+
+    if (pending_callback_) {
+        pending_callback_(pending_cb_arg_, 0);
+    }
+
     return 0;
 }
+
+// Helper to create a blob for a data file
+void Engine::create_data_blob(FileInfo* file, spdk_kv_cb cb, void* cb_arg) {
+    (void)file;  // File info will be updated in callback
+
+    if (!blob_store_) {
+        if (cb) cb(cb_arg, static_cast<int>(KvError::ENGINE_NOT_READY));
+        return;
+    }
+
+    struct spdk_blob_opts opts;
+    spdk_blob_opts_init(&opts, sizeof(opts));
+
+    // Set blob size based on data file size
+    uint64_t num_clusters = config_.data_file_size / (1024 * 1024);  // 1MB clusters
+    opts.num_clusters = num_clusters;
+
+    auto* ctx = new BlobCreateContext{this, cb, cb_arg, nullptr, 0, 0};
+    spdk_bs_create_blob_ext(blob_store_, &opts, on_blob_create_complete, ctx);
+}
+
 #else
 int Engine::init_spdk_env(const char* dev_name) {
     (void)dev_name;

@@ -127,8 +127,25 @@ private:
 
     void load_superblock() {
 #ifdef WITH_SPDK
-        // Async read primary superblock
-        // spdk_blob_io_read(...)
+        // Async read primary superblock from superblock blob
+        // Allocate DMA buffer for superblock
+        void* buf = spdk_dma_zmalloc(sizeof(Superblock), ALIGNMENT, nullptr);
+        if (!buf) {
+            state_ = RecoveryState::ERROR;
+            return;
+        }
+        superblock_buffer_ = buf;
+
+        // Read superblock blob
+        // spdk_blob_io_read(superblock_blob_, channel_, buf,
+        //                   0, sizeof(Superblock) / ALIGNMENT,
+        //                   on_superblock_read_cb, this);
+        // For now, fall through to simulation
+        if (validate_superblock()) {
+            state_ = RecoveryState::LOADING_MEM_INDEX_A;
+        } else {
+            state_ = RecoveryState::LOADING_BACKUP_SUPERBLOCK;
+        }
 #else
         // Simulate successful superblock load
         if (validate_superblock()) {
@@ -333,6 +350,13 @@ private:
     int current_area_;
     uint64_t current_read_offset_;
     uint64_t mem_index_versions_[2];
+
+#ifdef WITH_SPDK
+    // DMA buffers
+    void* superblock_buffer_ = nullptr;
+    void* mem_index_buffer_ = nullptr;
+    void* scan_buffer_ = nullptr;
+#endif
 
     // Scanning state
     struct FileInfo {

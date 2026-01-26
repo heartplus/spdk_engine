@@ -162,12 +162,19 @@ void CompactionTask::read_next_chunk() {
         return;
     }
 
-    size_t read_size = std::min(CHUNK_SIZE, total_bytes_to_read_ - current_read_offset_);
-
 #ifdef WITH_SPDK
-    // Async read
-    // spdk_blob_io_read(source_file_->blob, ..., read_complete_cb, this);
-    (void)read_size;
+    size_t read_size = std::min(CHUNK_SIZE, total_bytes_to_read_ - current_read_offset_);
+    // Async read from source blob
+    spdk_blob_io_read(source_file_->blob,
+                      engine_->io_channel(),
+                      read_buffer_,
+                      (source_file_->header.total_bytes + current_read_offset_) / ALIGNMENT,
+                      read_size / ALIGNMENT,
+                      [](void* arg, int bserrno) {
+                          auto* task = static_cast<CompactionTask*>(arg);
+                          task->on_read_complete(bserrno);
+                      },
+                      this);
 #else
     // Simulate read completion
     on_read_complete(0);
@@ -241,8 +248,17 @@ void CompactionTask::write_chunk() {
     }
 
 #ifdef WITH_SPDK
-    // Async write
-    // spdk_blob_io_write(target_file_->blob, ..., write_complete_cb, this);
+    // Async write to target blob
+    spdk_blob_io_write(target_file_->blob,
+                       engine_->io_channel(),
+                       write_buffer_,
+                       write_offset_ / ALIGNMENT,
+                       write_buffer_used_ / ALIGNMENT,
+                       [](void* arg, int bserrno) {
+                           auto* task = static_cast<CompactionTask*>(arg);
+                           task->on_write_complete(bserrno);
+                       },
+                       this);
 #else
     // Simulate write completion
     on_write_complete(0);

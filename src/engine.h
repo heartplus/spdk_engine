@@ -19,8 +19,10 @@
 #ifdef WITH_SPDK
 #include <spdk/bdev.h>
 #include <spdk/blob.h>
-#include <spdk/io_channel.h>
+#include <spdk/blob_bdev.h>
 #include <spdk/thread.h>
+#include <spdk/env.h>
+#include <spdk/log.h>
 #endif
 
 namespace spdk_kv {
@@ -139,6 +141,9 @@ public:
 #ifdef WITH_SPDK
     // Get blob store
     struct spdk_blob_store* blob_store() { return blob_store_; }
+
+    // Get IO channel
+    struct spdk_io_channel* io_channel() { return io_channel_; }
 #endif
 
 private:
@@ -175,6 +180,11 @@ private:
 
     // Create initial layout
     int create_initial_layout();
+
+#ifdef WITH_SPDK
+    // Create blob for data file
+    void create_data_blob(FileInfo* file, spdk_kv_cb cb, void* cb_arg);
+#endif
 
     // State
     EngineState state_;

@@ -117,7 +117,8 @@ struct SerializedMemIndex {
 
     // Members
     Header header;
-    CompactEntry entries[];  // Flexible array member
+    // Note: Entries follow the header in serialized form
+    // Use reinterpret_cast to access them after the header
 };
 static_assert(sizeof(SerializedMemIndex::Header) == 64, "Header must be 64 bytes");
 

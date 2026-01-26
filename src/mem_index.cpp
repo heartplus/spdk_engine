@@ -223,7 +223,7 @@ void MemIndex::clear_dirty_bitmap() {
     dirty_bitmap_[1] = 0;
 }
 
-size_t MemIndex::serialize(void* buffer, size_t buf_size) {
+size_t MemIndex::serialize(void* buffer, size_t /* buf_size */) {
     auto* output = static_cast<SerializedMemIndex*>(buffer);
 
     // Fill header
@@ -266,7 +266,7 @@ size_t MemIndex::serialize(void* buffer, size_t buf_size) {
     return data_size;
 }
 
-bool MemIndex::deserialize(const void* buffer, size_t data_size) {
+bool MemIndex::deserialize(const void* buffer, size_t /* data_size */) {
     auto* input = static_cast<const SerializedMemIndex*>(buffer);
 
     // Validate header

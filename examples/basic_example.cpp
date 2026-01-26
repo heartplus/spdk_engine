@@ -14,7 +14,7 @@ static bool operation_complete = false;
 static int operation_status = 0;
 
 // Callback for async operations
-static void on_complete(void* arg, int status) {
+static void on_complete(void* /* arg */, int status) {
     operation_status = status;
     operation_complete = true;
     printf("Operation completed with status: %d\n", status);

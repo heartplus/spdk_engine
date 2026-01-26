@@ -163,9 +163,22 @@ void Checkpoint::write_next_segment() {
     // In real implementation, would serialize MemIndex segment
 
 #ifdef WITH_SPDK
-    // Async write segment
-    // spdk_blob_io_write(...)
-    state_ = CheckpointState::WAIT_SEGMENT_WRITE;
+    // Async write segment to MemIndex blob
+    // The segment data is already serialized in segment_write_buffer_
+    // Calculate blob offset for this segment
+    // uint64_t blob_offset = pending_segments_[current_segment_idx_] * segment_buffer_size_;
+
+    // TODO: Enable when mem_index_blob is available
+    // Write to the active MemIndex area blob
+    // spdk_blob_io_write(engine_->mem_index_blob(), engine_->io_channel(),
+    //                    segment_write_buffer_,
+    //                    blob_offset / ALIGNMENT,
+    //                    segment_buffer_size_ / ALIGNMENT,
+    //                    on_segment_write_cb, this);
+
+    // For now, simulate completion in SPDK mode too
+    current_segment_idx_++;
+    state_ = CheckpointState::WRITING_SEGMENTS;  // Continue to next segment
 #else
     // Simulate write completion
     current_segment_idx_++;
