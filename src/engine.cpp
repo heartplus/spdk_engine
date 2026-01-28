@@ -9,6 +9,8 @@
 #include <fstream>
 #include <iostream>
 
+#include "spdk_kv/recovery.h"
+
 namespace spdk_kv {
 
 Engine::Engine()
@@ -184,11 +186,245 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
 }
 
 KvError Engine::LoadExisting(const OpenOpts& opts) {
-    (void)opts;  // Suppress unused parameter warning (used for future extension)
-    // For simulation mode, we don't actually persist data
-    // Just initialize as new
-    CreateOpts create_opts;
-    return InitializeNew(create_opts);
+    // Step 1: Load superblock from persistent storage
+    KvError err = LoadSuperblock();
+    if (err != KvError::kSuccess) {
+        return err;
+    }
+
+    // Step 2: Validate superblock
+    if (!superblock_.is_valid()) {
+        return KvError::kCorruption;
+    }
+
+    // Step 3: Load configuration from superblock
+    config_.max_capacity = superblock_.total_capacity;
+    config_.data_file_size = superblock_.data_file_size;
+    // Keep other config values at defaults or load from persistent storage if available
+
+    // Step 4: Initialize memory index
+    mem_index_ = std::make_unique<MemIndex>(config_.max_entries, config_.index_load_factor);
+    if (!mem_index_) {
+        return KvError::kInternalError;
+    }
+
+    // Step 5: Initialize append buffer manager
+    buffer_manager_ = std::make_unique<AppendBufferManager>();
+    if (!buffer_manager_->Initialize(config_.append_buffer_count, config_.append_buffer_size)) {
+        return KvError::kInternalError;
+    }
+
+    // Step 6: Initialize IO submitter
+    io_submitter_ = std::make_unique<IoSubmitter>();
+#ifdef WITH_SPDK
+    auto& env = SpdkEnv::Instance();
+    if (env.IsInitialized()) {
+        io_submitter_->Initialize(env.GetController(), env.GetNamespace(), env.GetBlobStore());
+        simulation_mode_ = false;
+    } else {
+        io_submitter_->InitializeSimulation();
+        simulation_mode_ = true;
+    }
+#else
+    io_submitter_->InitializeSimulation();
+#endif
+
+    // Step 7: Rebuild file info from superblock
+    err = RebuildFileInfo();
+    if (err != KvError::kSuccess) {
+        return err;
+    }
+
+    // Step 8: Initialize checkpoint manager
+    checkpoint_manager_ =
+            std::make_unique<IncrementalCheckpoint>(mem_index_.get(), mem_index_->Capacity());
+
+    // Step 9: Initialize compaction scheduler
+    compaction_scheduler_ = std::make_unique<CompactionScheduler>(mem_index_.get());
+    compaction_scheduler_->SetFileMetadata(&file_metadata_);
+
+    // Step 10: Restore statistics from superblock
+    total_data_bytes_ = superblock_.total_data_bytes;
+    total_garbage_bytes_ = superblock_.total_garbage_bytes;
+    active_file_id_ = superblock_.active_file_id;
+    next_file_id_ = superblock_.file_count;
+
+    // Step 11: Restore global sequence number from checkpoint
+    // This will be updated during recovery if needed
+    mem_index_->SetGlobalSequence(superblock_.checkpoint_global_seq);
+
+    // Step 12: Perform recovery if requested
+    if (opts.recover) {
+        err = RecoverMemIndex();
+        if (err != KvError::kSuccess) {
+            return err;
+        }
+    }
+
+    // Step 13: Update last mount time in superblock
+    auto now = std::chrono::system_clock::now().time_since_epoch();
+    superblock_.last_mount_time = std::chrono::duration_cast<std::chrono::seconds>(now).count();
+
+    return KvError::kSuccess;
+}
+
+KvError Engine::LoadSuperblock() {
+#ifdef WITH_SPDK
+    if (!simulation_mode_) {
+        // In SPDK mode, superblock is loaded from blob
+        // This is handled asynchronously elsewhere
+        // For now, return success if superblock was already loaded
+        if (superblock_.is_valid()) {
+            return KvError::kSuccess;
+        }
+        return KvError::kCorruption;
+    }
+#endif
+
+    // Simulation mode: Try to load superblock from file
+    std::string superblock_path = path_ + "/superblock";
+    std::ifstream file(superblock_path, std::ios::binary);
+    if (!file.is_open()) {
+        // No superblock file, engine doesn't exist at this path
+        return KvError::kCorruption;
+    }
+
+    // Read superblock
+    file.read(reinterpret_cast<char*>(&superblock_), sizeof(superblock_));
+    if (!file.good()) {
+        return KvError::kIoError;
+    }
+
+    // Validate checksum
+    uint32_t stored_checksum = superblock_.checksum;
+    uint32_t computed_checksum =
+            Crc32::Calculate(&superblock_, sizeof(superblock_) - sizeof(superblock_.checksum));
+    if (stored_checksum != computed_checksum) {
+        // Try backup superblock
+        std::string backup_path = path_ + "/superblock.bak";
+        std::ifstream backup_file(backup_path, std::ios::binary);
+        if (!backup_file.is_open()) {
+            return KvError::kCorruption;
+        }
+        backup_file.read(reinterpret_cast<char*>(&superblock_), sizeof(superblock_));
+        if (!backup_file.good()) {
+            return KvError::kIoError;
+        }
+        // Validate backup checksum
+        stored_checksum = superblock_.checksum;
+        computed_checksum =
+                Crc32::Calculate(&superblock_, sizeof(superblock_) - sizeof(superblock_.checksum));
+        if (stored_checksum != computed_checksum) {
+            return KvError::kCorruption;
+        }
+    }
+
+    return KvError::kSuccess;
+}
+
+KvError Engine::RebuildFileInfo() {
+    files_.clear();
+
+    // Rebuild file info from superblock's file_mappings
+    for (uint16_t i = 0; i < superblock_.file_count; i++) {
+        const FileMapping& mapping = superblock_.file_mappings[i];
+
+        auto file = std::make_unique<FileInfo>();
+        file->file_id = mapping.file_id;
+        file->blob_id = mapping.blob_id;
+        file->state = mapping.state;
+        file->size = mapping.size;
+        file->write_offset = mapping.write_offset;
+
+#ifdef WITH_SPDK
+        file->blob = nullptr;
+        file->blob_opened = false;
+
+        if (!simulation_mode_) {
+            // In SPDK mode, open the blob for this file
+            FileInfo* ptr = file.get();
+            files_.push_back(std::move(file));
+            OpenBlobForFile(ptr, nullptr);
+            continue;
+        }
+#endif
+
+        // Simulation mode: Load file data from disk
+        std::string file_path = path_ + "/data_" + std::to_string(mapping.file_id);
+        std::ifstream data_file(file_path, std::ios::binary | std::ios::ate);
+        if (data_file.is_open()) {
+            size_t file_size = data_file.tellg();
+            data_file.seekg(0, std::ios::beg);
+            file->data.resize(file_size);
+            data_file.read(file->data.data(), file_size);
+        } else {
+            // If file doesn't exist, allocate space but mark as potentially corrupt
+            file->data.resize(config_.data_file_size);
+        }
+
+        // Initialize file metadata for compaction tracking
+        auto& meta = file_metadata_[file->file_id];
+        meta.file_id = file->file_id;
+        meta.state = file->state;
+        meta.total_entries = 0;
+        meta.valid_entries = 0;
+        meta.total_bytes = file->size;
+        meta.valid_bytes = 0;
+
+        files_.push_back(std::move(file));
+    }
+
+    // If no files exist, create the first one
+    if (files_.empty()) {
+        FileInfo* new_file = AllocateNewFile();
+        if (!new_file) {
+            return KvError::kInternalError;
+        }
+        active_file_id_ = new_file->file_id;
+    }
+
+    return KvError::kSuccess;
+}
+
+KvError Engine::RecoverMemIndex() {
+    // Use IndexLoader to recover MemIndex from checkpoint and data files
+    IndexLoader loader(mem_index_.get());
+
+    // Set the superblock for the loader
+    loader.SetSuperblock(superblock_);
+
+    // Prepare file data for scanning
+    std::vector<IndexLoader::FileData> file_data;
+    for (const auto& file : files_) {
+        if (file->state != FileState::kDeleted && !file->data.empty()) {
+            IndexLoader::FileData fd;
+            fd.file_id = file->file_id;
+            fd.size = file->size;
+            fd.data = file->data.data();
+            file_data.push_back(fd);
+        }
+    }
+    loader.SetFileData(file_data);
+
+    // Start recovery (synchronous in simulation mode)
+    KvError recovery_error = KvError::kSuccess;
+    loader.StartRecovery([&recovery_error](KvError status) { recovery_error = status; });
+
+    // Poll until complete (in simulation mode, this is immediate)
+    while (loader.Poll()) {
+        // In simulation mode, this loop should exit immediately
+    }
+
+    if (loader.IsSuccess()) {
+        // Update global sequence from recovery
+        uint32_t recovered_max_seq = loader.GetRecoveredMaxSequence();
+        uint32_t checkpoint_seq = superblock_.checkpoint_global_seq;
+        uint32_t new_global_seq = std::max(checkpoint_seq, recovered_max_seq) + 1;
+        mem_index_->SetGlobalSequence(new_global_seq);
+        return KvError::kSuccess;
+    }
+
+    return recovery_error;
 }
 
 KvError Engine::Recover() {

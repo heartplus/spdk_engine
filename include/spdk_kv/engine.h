@@ -141,6 +141,9 @@ private:
     KvError InitializeNew(const CreateOpts& opts);
     KvError LoadExisting(const OpenOpts& opts);
     KvError Recover();
+    KvError LoadSuperblock();
+    KvError RebuildFileInfo();
+    KvError RecoverMemIndex();
 
     // File management
     FileInfo* GetActiveFile();
