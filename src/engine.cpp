@@ -21,7 +21,9 @@ Engine::Engine()
           total_garbage_bytes_(0),
           compaction_enabled_(true),
           pending_foreground_count_(0),
-          pending_blob_ops_(0) {
+          pending_blob_ops_(0),
+          superblock_blob_(nullptr),
+          superblock_blob_id_(SPDK_BLOBID_INVALID) {
     std::memset(&superblock_, 0, sizeof(superblock_));
 }
 
@@ -89,18 +91,53 @@ KvError Engine::Close() {
         buffer_manager_->SubmitCurrentBuffer();
     }
 
-    // In SPDK mode, close all open blobs
+    // Update superblock with latest state before persisting
+    superblock_.active_file_id = active_file_id_;
+    superblock_.total_data_bytes = total_data_bytes_;
+    superblock_.total_garbage_bytes = total_garbage_bytes_;
+    superblock_.total_entries = mem_index_ ? mem_index_->Size() : 0;
+
+    // Update file mappings with current state
+    for (const auto& file : files_) {
+        UpdateSuperblockFileMapping(file.get());
+    }
+
+    // Persist superblock
+    if (superblock_blob_) {
+        WriteSuperblock();
+    }
+
+    // Close all open data blobs
     for (auto& file : files_) {
         if (file->blob_opened && file->blob) {
             CloseBlobForFile(file.get(), nullptr);
         }
     }
+
     // Wait for pending blob operations to complete
     while (pending_blob_ops_ > 0) {
         if (io_submitter_) {
             io_submitter_->ProcessCompletions(32);
         }
         SpdkEnv::Instance().Poll();
+    }
+
+    // Close superblock blob
+    if (superblock_blob_) {
+        auto& env = SpdkEnv::Instance();
+        if (env.IsInitialized()) {
+            struct CloseCtx {
+                bool done;
+            };
+            CloseCtx close_ctx{false};
+
+            env.CloseBlob(superblock_blob_, [&close_ctx](int) { close_ctx.done = true; });
+
+            while (!close_ctx.done) {
+                env.Poll();
+            }
+        }
+        superblock_blob_ = nullptr;
     }
 
     // Clean up resources
@@ -145,29 +182,39 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
     if (env.IsInitialized()) {
         io_submitter_->Initialize(env.GetController(), env.GetNamespace(), env.GetBlobStore());
     } else {
-        // TODO:
         return KvError::kInternalError;
     }
 
-    // Create first data file
-    FileInfo* file = AllocateNewFile();
-    if (!file) {
-        return KvError::kInternalError;
-    }
-    active_file_id_ = file->file_id;
-
-    // Initialize superblock
+    // Initialize superblock in memory (before AllocateNewFile, which updates file_mappings)
     auto now = std::chrono::system_clock::now().time_since_epoch();
     superblock_.magic = kSuperblockMagic;
     superblock_.version = 1;
-    superblock_.sequence = 1;
+    superblock_.sequence = 0;
     superblock_.create_time = std::chrono::duration_cast<std::chrono::seconds>(now).count();
     superblock_.last_mount_time = superblock_.create_time;
     superblock_.total_capacity = config_.max_capacity;
     superblock_.data_file_size = config_.data_file_size;
     superblock_.alignment_unit = kPageSize;
+    superblock_.file_count = 0;
+
+    // Create first data file (this calls UpdateSuperblockFileMapping internally)
+    FileInfo* file = AllocateNewFile();
+    if (!file) {
+        return KvError::kInternalError;
+    }
+    active_file_id_ = file->file_id;
     superblock_.active_file_id = active_file_id_;
-    superblock_.file_count = 1;
+
+    // Create superblock blob and persist to NVMe
+    KvError sb_err = CreateSuperblockBlob();
+    if (sb_err != KvError::kSuccess) {
+        return sb_err;
+    }
+
+    sb_err = WriteSuperblock();
+    if (sb_err != KvError::kSuccess) {
+        return sb_err;
+    }
 
     return KvError::kSuccess;
 }
@@ -250,18 +297,157 @@ KvError Engine::LoadExisting(const OpenOpts& opts) {
 }
 
 KvError Engine::LoadSuperblock() {
-    // TODO: need impl this
-    // In SPDK mode, superblock is loaded from blob
-    // This is handled asynchronously elsewhere
-    // For now, return success if superblock was already loaded
-    if (superblock_.is_valid()) {
-        return KvError::kSuccess;
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized() || !env.GetBlobStore()) {
+        return KvError::kInternalError;
     }
+
+    // Step 1: Get super blob ID from blobstore
+    struct GetSuperCtx {
+        spdk_blob_id blob_id;
+        int status;
+        bool done;
+    };
+    GetSuperCtx get_ctx{SPDK_BLOBID_INVALID, 0, false};
+
+    spdk_bs_get_super(env.GetBlobStore(),
+                      [](void* arg, spdk_blob_id blobid, int bserrno) {
+                          auto* ctx = static_cast<GetSuperCtx*>(arg);
+                          ctx->blob_id = blobid;
+                          ctx->status = bserrno;
+                          ctx->done = true;
+                      },
+                      &get_ctx);
+
+    while (!get_ctx.done) {
+        env.Poll();
+    }
+
+    if (get_ctx.status != 0 || get_ctx.blob_id == SPDK_BLOBID_INVALID) {
+        return KvError::kCorruption;
+    }
+
+    superblock_blob_id_ = get_ctx.blob_id;
+
+    // Step 2: Open the super blob
+    struct OpenCtx {
+        spdk_blob* blob;
+        int status;
+        bool done;
+    };
+    OpenCtx open_ctx{nullptr, 0, false};
+
+    spdk_bs_open_blob(env.GetBlobStore(), superblock_blob_id_,
+                      [](void* arg, struct spdk_blob* blob, int bserrno) {
+                          auto* ctx = static_cast<OpenCtx*>(arg);
+                          ctx->blob = blob;
+                          ctx->status = bserrno;
+                          ctx->done = true;
+                      },
+                      &open_ctx);
+
+    while (!open_ctx.done) {
+        env.Poll();
+    }
+
+    if (open_ctx.status != 0 || !open_ctx.blob) {
+        return KvError::kCorruption;
+    }
+
+    superblock_blob_ = open_ctx.blob;
+
+    // Step 3: Read primary superblock
+    size_t sb_aligned_size = AlignUp(sizeof(Superblock), kPageSize);
+    void* read_buf = DmaAllocator::AllocZeroed(sb_aligned_size, kPageSize);
+    if (!read_buf) {
+        return KvError::kInternalError;
+    }
+
+    auto* channel = env.GetIoChannel();
+    if (!channel) {
+        DmaAllocator::Free(read_buf);
+        return KvError::kInternalError;
+    }
+
+    uint64_t io_unit_size = spdk_bs_get_io_unit_size(env.GetBlobStore());
+    uint64_t length_units = sb_aligned_size / io_unit_size;
+
+    struct ReadCtx {
+        int status;
+        bool done;
+    };
+    ReadCtx read_ctx{0, false};
+
+    spdk_blob_io_read(superblock_blob_, channel, read_buf, kSuperblockPrimaryOffset / io_unit_size,
+                      length_units,
+                      [](void* arg, int bserrno) {
+                          auto* ctx = static_cast<ReadCtx*>(arg);
+                          ctx->status = bserrno;
+                          ctx->done = true;
+                      },
+                      &read_ctx);
+
+    while (!read_ctx.done) {
+        env.Poll();
+    }
+
+    if (read_ctx.status == 0) {
+        // Validate primary superblock
+        auto* sb = static_cast<Superblock*>(read_buf);
+        if (sb->magic == kSuperblockMagic) {
+            uint32_t stored_checksum = sb->checksum;
+            uint32_t computed = Crc32::Calculate(sb, sizeof(Superblock) - sizeof(uint32_t));
+            if (stored_checksum == computed) {
+                std::memcpy(&superblock_, sb, sizeof(Superblock));
+                DmaAllocator::Free(read_buf);
+                return KvError::kSuccess;
+            }
+        }
+    }
+
+    // Step 4: Primary invalid, try backup superblock at kSuperblockBackupOffset
+    ReadCtx backup_ctx{0, false};
+
+    spdk_blob_io_read(superblock_blob_, channel, read_buf, kSuperblockBackupOffset / io_unit_size,
+                      length_units,
+                      [](void* arg, int bserrno) {
+                          auto* ctx = static_cast<ReadCtx*>(arg);
+                          ctx->status = bserrno;
+                          ctx->done = true;
+                      },
+                      &backup_ctx);
+
+    while (!backup_ctx.done) {
+        env.Poll();
+    }
+
+    if (backup_ctx.status == 0) {
+        auto* sb = static_cast<Superblock*>(read_buf);
+        if (sb->magic == kSuperblockMagic) {
+            uint32_t stored_checksum = sb->checksum;
+            uint32_t computed = Crc32::Calculate(sb, sizeof(Superblock) - sizeof(uint32_t));
+            if (stored_checksum == computed) {
+                std::memcpy(&superblock_, sb, sizeof(Superblock));
+                DmaAllocator::Free(read_buf);
+                return KvError::kSuccess;
+            }
+        }
+    }
+
+    DmaAllocator::Free(read_buf);
     return KvError::kCorruption;
 }
 
 KvError Engine::RebuildFileInfo() {
     files_.clear();
+
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized()) {
+        return KvError::kInternalError;
+    }
+
+    size_t pending_opens = 0;
+    bool open_error = false;
 
     // Rebuild file info from superblock's file_mappings
     for (uint16_t i = 0; i < superblock_.file_count; i++) {
@@ -273,16 +459,49 @@ KvError Engine::RebuildFileInfo() {
         file->state = mapping.state;
         file->size = mapping.size;
         file->write_offset = mapping.write_offset;
-
         file->blob = nullptr;
         file->blob_opened = false;
 
-        // TODO: 这里完成SPDK模式下的blob打开
-        // In SPDK mode, open the blob for this file
+        // Initialize file metadata for compaction tracking
+        auto& meta = file_metadata_[file->file_id];
+        meta.file_id = file->file_id;
+        meta.state = file->state;
+        meta.total_entries = 0;
+        meta.valid_entries = 0;
+        meta.total_bytes = file->size;
+        meta.valid_bytes = 0;
+
+        // Track next_file_id_
+        if (file->file_id >= next_file_id_) {
+            next_file_id_ = file->file_id + 1;
+        }
+
         FileInfo* ptr = file.get();
         files_.push_back(std::move(file));
-        OpenBlobForFile(ptr, nullptr);
-        continue;
+
+        // Open the existing blob (without writing header - data already on disk)
+        pending_opens++;
+        pending_blob_ops_++;
+        env.OpenBlob(ptr->blob_id,
+                     [this, ptr, &pending_opens, &open_error](spdk_blob* blob) {
+                         pending_blob_ops_--;
+                         pending_opens--;
+                         if (!blob) {
+                             open_error = true;
+                             return;
+                         }
+                         ptr->blob = blob;
+                         ptr->blob_opened = true;
+                     });
+    }
+
+    // Wait for all blob opens to complete
+    while (pending_opens > 0) {
+        env.Poll();
+    }
+
+    if (open_error) {
+        return KvError::kIoError;
     }
 
     // If no files exist, create the first one
@@ -317,13 +536,13 @@ KvError Engine::RecoverMemIndex() {
     }
     loader.SetFileData(file_data);
 
-    // Start recovery (synchronous in simulation mode)
+    // Start recovery
     KvError recovery_error = KvError::kSuccess;
     loader.StartRecovery([&recovery_error](KvError status) { recovery_error = status; });
 
-    // Poll until complete (in simulation mode, this is immediate)
+    // Poll until recovery completes
     while (loader.Poll()) {
-        // In simulation mode, this loop should exit immediately
+        // Process completions while recovery is in progress
     }
 
     if (loader.IsSuccess()) {
@@ -339,31 +558,53 @@ KvError Engine::RecoverMemIndex() {
 }
 
 KvError Engine::Recover() {
-    // No recovery needed in simulation mode
+    // Recovery is handled by RecoverMemIndex() called from LoadExisting()
     return KvError::kSuccess;
 }
 
 FileInfo* Engine::AllocateNewFile() {
     auto file = std::make_unique<FileInfo>();
     file->file_id = next_file_id_++;
-    file->blob_id = file->file_id;  // Use file_id as blob_id in simulation
+    file->blob_id = 0;  // Will be assigned by SPDK
     file->state = FileState::kActive;
     file->size = 0;
     file->write_offset = sizeof(DataFileHeader);  // Skip header
-
     file->blob = nullptr;
     file->blob_opened = false;
 
-    // TODO: 这里完成SPDK模式下的blob分配
-    // In SPDK mode, we'll allocate blob asynchronously
-    // For now, just store the file and allocate blob later
     FileInfo* ptr = file.get();
     files_.push_back(std::move(file));
 
-    // Allocate blob for this file
-    AllocateBlobForFile(ptr, [](bool) {
-        // Blob allocation callback - handled asynchronously
+    // Allocate blob synchronously (poll until allocation + open + header write completes)
+    bool alloc_done = false;
+    bool alloc_success = false;
+    AllocateBlobForFile(ptr, [&alloc_done, &alloc_success](bool success) {
+        alloc_success = success;
+        alloc_done = true;
     });
+
+    while (!alloc_done) {
+        SpdkEnv::Instance().Poll();
+    }
+
+    if (!alloc_success) {
+        files_.pop_back();
+        next_file_id_--;
+        return nullptr;
+    }
+
+    // Initialize file metadata for compaction tracking
+    auto& meta = file_metadata_[ptr->file_id];
+    meta.file_id = ptr->file_id;
+    meta.state = ptr->state;
+    meta.total_entries = 0;
+    meta.valid_entries = 0;
+    meta.total_bytes = 0;
+    meta.valid_bytes = 0;
+
+    // Update superblock file mapping
+    UpdateSuperblockFileMapping(ptr);
+
     return ptr;
 }
 
@@ -1124,6 +1365,190 @@ spdk_blob* Engine::GetBlobForFile(uint16_t file_id) {
         return nullptr;
     }
     return file->blob;
+}
+
+KvError Engine::CreateSuperblockBlob() {
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized() || !env.GetBlobStore()) {
+        return KvError::kInternalError;
+    }
+
+    // Step 1: Allocate a blob for the superblock
+    struct AllocCtx {
+        spdk_blob_id blob_id;
+        bool done;
+    };
+    AllocCtx alloc_ctx{SPDK_BLOBID_INVALID, false};
+
+    env.AllocateBlob(kSuperblockBlobSize, [&alloc_ctx](uint64_t blob_id) {
+        alloc_ctx.blob_id = blob_id;
+        alloc_ctx.done = true;
+    });
+
+    while (!alloc_ctx.done) {
+        env.Poll();
+    }
+
+    if (alloc_ctx.blob_id == SPDK_BLOBID_INVALID) {
+        return KvError::kIoError;
+    }
+
+    superblock_blob_id_ = alloc_ctx.blob_id;
+
+    // Step 2: Set as blobstore's super blob
+    struct SetSuperCtx {
+        int status;
+        bool done;
+    };
+    SetSuperCtx set_ctx{0, false};
+
+    spdk_bs_set_super(env.GetBlobStore(), superblock_blob_id_,
+                      [](void* arg, int bserrno) {
+                          auto* ctx = static_cast<SetSuperCtx*>(arg);
+                          ctx->status = bserrno;
+                          ctx->done = true;
+                      },
+                      &set_ctx);
+
+    while (!set_ctx.done) {
+        env.Poll();
+    }
+
+    if (set_ctx.status != 0) {
+        return KvError::kIoError;
+    }
+
+    // Step 3: Open the blob
+    struct OpenCtx {
+        spdk_blob* blob;
+        int status;
+        bool done;
+    };
+    OpenCtx open_ctx{nullptr, 0, false};
+
+    spdk_bs_open_blob(env.GetBlobStore(), superblock_blob_id_,
+                      [](void* arg, struct spdk_blob* blob, int bserrno) {
+                          auto* ctx = static_cast<OpenCtx*>(arg);
+                          ctx->blob = blob;
+                          ctx->status = bserrno;
+                          ctx->done = true;
+                      },
+                      &open_ctx);
+
+    while (!open_ctx.done) {
+        env.Poll();
+    }
+
+    if (open_ctx.status != 0 || !open_ctx.blob) {
+        return KvError::kIoError;
+    }
+
+    superblock_blob_ = open_ctx.blob;
+    return KvError::kSuccess;
+}
+
+KvError Engine::WriteSuperblock() {
+    auto& env = SpdkEnv::Instance();
+    if (!superblock_blob_ || !env.IsInitialized()) {
+        return KvError::kInternalError;
+    }
+
+    auto* channel = env.GetIoChannel();
+    if (!channel) {
+        return KvError::kInternalError;
+    }
+
+    // Increment sequence and calculate checksum
+    superblock_.sequence++;
+    superblock_.checksum = Crc32::Calculate(&superblock_, sizeof(Superblock) - sizeof(uint32_t));
+
+    // Allocate DMA buffer and copy superblock
+    size_t sb_aligned_size = AlignUp(sizeof(Superblock), kPageSize);
+    void* write_buf = DmaAllocator::AllocZeroed(sb_aligned_size, kPageSize);
+    if (!write_buf) {
+        return KvError::kInternalError;
+    }
+
+    std::memcpy(write_buf, &superblock_, sizeof(Superblock));
+
+    uint64_t io_unit_size = spdk_bs_get_io_unit_size(env.GetBlobStore());
+    uint64_t length_units = sb_aligned_size / io_unit_size;
+
+    struct WriteCtx {
+        int status;
+        bool done;
+    };
+
+    // Write backup first (design: backup first, then primary)
+    WriteCtx backup_ctx{0, false};
+
+    spdk_blob_io_write(superblock_blob_, channel, write_buf,
+                       kSuperblockBackupOffset / io_unit_size, length_units,
+                       [](void* arg, int bserrno) {
+                           auto* ctx = static_cast<WriteCtx*>(arg);
+                           ctx->status = bserrno;
+                           ctx->done = true;
+                       },
+                       &backup_ctx);
+
+    while (!backup_ctx.done) {
+        env.Poll();
+    }
+
+    if (backup_ctx.status != 0) {
+        DmaAllocator::Free(write_buf);
+        return KvError::kIoError;
+    }
+
+    // Write primary
+    WriteCtx primary_ctx{0, false};
+
+    spdk_blob_io_write(superblock_blob_, channel, write_buf,
+                       kSuperblockPrimaryOffset / io_unit_size, length_units,
+                       [](void* arg, int bserrno) {
+                           auto* ctx = static_cast<WriteCtx*>(arg);
+                           ctx->status = bserrno;
+                           ctx->done = true;
+                       },
+                       &primary_ctx);
+
+    while (!primary_ctx.done) {
+        env.Poll();
+    }
+
+    DmaAllocator::Free(write_buf);
+
+    if (primary_ctx.status != 0) {
+        return KvError::kIoError;
+    }
+
+    return KvError::kSuccess;
+}
+
+void Engine::UpdateSuperblockFileMapping(FileInfo* file) {
+    if (!file) return;
+
+    // Find existing mapping or add new one
+    for (uint16_t i = 0; i < superblock_.file_count; i++) {
+        if (superblock_.file_mappings[i].file_id == file->file_id) {
+            superblock_.file_mappings[i].blob_id = file->blob_id;
+            superblock_.file_mappings[i].size = file->size;
+            superblock_.file_mappings[i].write_offset = file->write_offset;
+            superblock_.file_mappings[i].state = file->state;
+            return;
+        }
+    }
+
+    // Add new mapping
+    if (superblock_.file_count < kMaxFileCount) {
+        auto& mapping = superblock_.file_mappings[superblock_.file_count];
+        mapping.file_id = file->file_id;
+        mapping.blob_id = file->blob_id;
+        mapping.size = file->size;
+        mapping.write_offset = file->write_offset;
+        mapping.state = file->state;
+        superblock_.file_count++;
+    }
 }
 
 // C API implementation

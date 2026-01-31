@@ -166,6 +166,11 @@ private:
     // Get SPDK blob for a file
     spdk_blob* GetBlobForFile(uint16_t file_id);
 
+    // Superblock blob management
+    KvError CreateSuperblockBlob();
+    KvError WriteSuperblock();
+    void UpdateSuperblockFileMapping(FileInfo* file);
+
     // Entry building
     void BuildEntryInplace(void* slot, uint64_t key, const void* value, uint32_t len, uint32_t seq,
                            bool is_tombstone = false);
@@ -216,6 +221,10 @@ private:
 
     // Pending blob operations count
     size_t pending_blob_ops_;
+
+    // Superblock blob
+    spdk_blob* superblock_blob_;
+    spdk_blob_id superblock_blob_id_;
 };
 
 // C-style API wrapper (for compatibility)

@@ -28,6 +28,11 @@ constexpr uint32_t kDataFileHeaderMagic = 0x53504446;  // "SPDF"
 constexpr uint32_t kMemIndexMagic = 0x4D494458;        // "MIDX"
 constexpr uint32_t kSegmentMagic = 0x53454748;         // "SEGH"
 
+// Superblock layout
+constexpr uint64_t kSuperblockPrimaryOffset = 0;
+constexpr uint64_t kSuperblockBackupOffset = 4 * 1024 * 1024;   // 4MB
+constexpr uint64_t kSuperblockBlobSize = 8 * 1024 * 1024;       // 8MB
+
 // MemIndex configuration
 constexpr size_t kMemIndexSegmentSize = 1ULL * 1024 * 1024 * 1024;  // 1GB
 constexpr size_t kMemIndexSegmentCount = 80;                        // 80 segments per area
