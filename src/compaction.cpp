@@ -15,8 +15,7 @@ namespace spdk_kv {
 // ============================================================================
 
 SparseBitmap::SparseBitmap(size_t total_bits)
-        : total_bits_(total_bits),
-          chunk_count_((total_bits + kChunkBits - 1) / kChunkBits) {}
+        : total_bits_(total_bits), chunk_count_((total_bits + kChunkBits - 1) / kChunkBits) {}
 
 void SparseBitmap::Set(size_t idx) {
     if (idx >= total_bits_) return;
@@ -58,9 +57,7 @@ bool SparseBitmap::Test(size_t idx) const {
     return it->second->Test(idx % kChunkBits);
 }
 
-size_t SparseBitmap::MemoryUsage() const {
-    return chunks_.size() * sizeof(Chunk) + sizeof(*this);
-}
+size_t SparseBitmap::MemoryUsage() const { return chunks_.size() * sizeof(Chunk) + sizeof(*this); }
 
 size_t SparseBitmap::PopCount() const {
     size_t count = 0;
@@ -317,15 +314,15 @@ bool CompactionTask::ValidateEntry(const void* entry_data, size_t max_size) {
             *reinterpret_cast<const uint32_t*>(ptr + sizeof(EntryHeader) + sizeof(uint64_t));
 
     // Calculate entry size
-    size_t entry_size =
-            AlignUp(sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t) + value_len +
-                            sizeof(uint32_t),
-                    kPageSize);
+    size_t entry_size = AlignUp(sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t) +
+                                        value_len + sizeof(uint32_t),
+                                kPageSize);
 
     if (entry_size > max_size) return false;
 
     // Validate checksum
-    uint32_t stored_checksum = *reinterpret_cast<const uint32_t*>(ptr + entry_size - sizeof(uint32_t));
+    uint32_t stored_checksum =
+            *reinterpret_cast<const uint32_t*>(ptr + entry_size - sizeof(uint32_t));
     uint32_t computed_checksum = Crc32::Calculate(ptr, entry_size - sizeof(uint32_t));
 
     return stored_checksum == computed_checksum;
@@ -346,13 +343,12 @@ void CompactionTask::ProcessEntries() {
 
         const auto* header = reinterpret_cast<const EntryHeader*>(ptr + offset);
         uint64_t key = *reinterpret_cast<const uint64_t*>(ptr + offset + sizeof(EntryHeader));
-        uint32_t value_len = *reinterpret_cast<const uint32_t*>(
-                ptr + offset + sizeof(EntryHeader) + sizeof(uint64_t));
+        uint32_t value_len = *reinterpret_cast<const uint32_t*>(ptr + offset + sizeof(EntryHeader) +
+                                                                sizeof(uint64_t));
 
-        size_t entry_size =
-                AlignUp(sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t) + value_len +
-                                sizeof(uint32_t),
-                        kPageSize);
+        size_t entry_size = AlignUp(sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t) +
+                                            value_len + sizeof(uint32_t),
+                                    kPageSize);
 
         entries_processed_++;
 
@@ -388,7 +384,8 @@ void CompactionTask::ProcessEntries() {
             migrated.old_offset_index =
                     static_cast<uint32_t>((current_offset_ - kChunkSize + offset) / kPageSize);
             migrated.new_file_id = dest_file_ ? dest_file_->file_id : 0;
-            migrated.new_offset_index = static_cast<uint32_t>((dest_offset_ + write_buffer_used_) / kPageSize);
+            migrated.new_offset_index =
+                    static_cast<uint32_t>((dest_offset_ + write_buffer_used_) / kPageSize);
             migrated.page_count = static_cast<uint16_t>(entry_size / kPageSize);
             migrated.sequence = header->sequence;
             migrated_entries_.push_back(migrated);
@@ -586,8 +583,9 @@ std::vector<FileMetadata*> CompactionScheduler::SelectFilesForCompaction(double 
     }
 
     // Sort by garbage ratio (highest first)
-    std::sort(candidates.begin(), candidates.end(),
-              [](FileMetadata* a, FileMetadata* b) { return a->GarbageRatio() > b->GarbageRatio(); });
+    std::sort(candidates.begin(), candidates.end(), [](FileMetadata* a, FileMetadata* b) {
+        return a->GarbageRatio() > b->GarbageRatio();
+    });
 
     return candidates;
 }

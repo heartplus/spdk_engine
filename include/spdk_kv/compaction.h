@@ -168,7 +168,7 @@ public:
 
     // Retry configuration
     static constexpr int kMaxRetryCount = 3;
-    static constexpr uint64_t kRetryDelayUs = 1000;  // 1ms
+    static constexpr uint64_t kRetryDelayUs = 1000;    // 1ms
     static constexpr size_t kChunkSize = 1024 * 1024;  // 1MB
 
     CompactionTask(FileMetadata* src_file, MemIndex* mem_index);
@@ -265,7 +265,7 @@ private:
 class CompactionScheduler {
 public:
     // Configuration
-    static constexpr size_t kUnitSize = 1024 * 1024;  // 1MB per unit
+    static constexpr size_t kUnitSize = 1024 * 1024;      // 1MB per unit
     static constexpr uint64_t kMaxCyclesPerPoll = 50000;  // ~25us @2GHz
     static constexpr uint32_t kMaxIopsPerSec = 1000;
 

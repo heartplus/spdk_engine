@@ -29,8 +29,7 @@ IncrementalCheckpoint::IncrementalCheckpoint(MemIndex* mem_index, uint64_t capac
 IncrementalCheckpoint::~IncrementalCheckpoint() {}
 
 void IncrementalCheckpoint::MarkDirty(uint64_t bucket_index) {
-    uint32_t segment_id =
-            static_cast<uint32_t>(bucket_index / (capacity_ / kMemIndexSegmentCount));
+    uint32_t segment_id = static_cast<uint32_t>(bucket_index / (capacity_ / kMemIndexSegmentCount));
     if (segment_id < kMemIndexSegmentCount) {
         dirty_segments_.set(segment_id);
     }
@@ -141,9 +140,7 @@ void IncrementalCheckpoint::OnSyncComplete(int status) {
     OnSuperblockUpdated(0);  // Simulation: immediate completion
 }
 
-void IncrementalCheckpoint::OnSuperblockUpdated(int status) {
-    CompleteCheckpoint(status);
-}
+void IncrementalCheckpoint::OnSuperblockUpdated(int status) { CompleteCheckpoint(status); }
 
 void IncrementalCheckpoint::CompleteCheckpoint(int status) {
     if (status == 0) {

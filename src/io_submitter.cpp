@@ -10,31 +10,22 @@
 namespace spdk_kv {
 
 IoSubmitter::IoSubmitter()
-        :
-#ifdef WITH_SPDK
-          ctrlr_(nullptr),
+        : ctrlr_(nullptr),
           ns_(nullptr),
           qpair_(nullptr),
           blobstore_(nullptr),
-          io_channel_(nullptr),
-#endif
-          simulation_mode_(true) {
-}
+          io_channel_(nullptr) {}
 
 IoSubmitter::~IoSubmitter() {
-#ifdef WITH_SPDK
     if (qpair_) {
         spdk_nvme_ctrlr_free_io_qpair(qpair_);
     }
     if (io_channel_) {
         spdk_bs_free_io_channel(io_channel_);
     }
-#endif
 }
 
-#ifdef WITH_SPDK
-bool IoSubmitter::Initialize(spdk_nvme_ctrlr* ctrlr, spdk_nvme_ns* ns,
-                             spdk_blob_store* blobstore) {
+bool IoSubmitter::Initialize(spdk_nvme_ctrlr* ctrlr, spdk_nvme_ns* ns, spdk_blob_store* blobstore) {
     ctrlr_ = ctrlr;
     ns_ = ns;
     blobstore_ = blobstore;
@@ -57,15 +48,10 @@ bool IoSubmitter::Initialize(spdk_nvme_ctrlr* ctrlr, spdk_nvme_ns* ns,
         return false;
     }
 
-    simulation_mode_ = false;
     return true;
 }
-#endif
 
-bool IoSubmitter::InitializeSimulation() {
-    simulation_mode_ = true;
-    return true;
-}
+bool IoSubmitter::InitializeSimulation() { return true; }
 
 void IoSubmitter::SubmitWrite(AppendBuffer* buffer, uint64_t file_offset,
                               const std::vector<WriteContext>& contexts,
@@ -76,12 +62,6 @@ void IoSubmitter::SubmitWrite(AppendBuffer* buffer, uint64_t file_offset,
     pw.contexts = contexts;
     pw.callback = std::move(callback);
     pending_writes_.push(std::move(pw));
-
-    if (simulation_mode_) {
-        // In simulation mode, complete immediately
-        // The actual data was already written to the buffer in Engine::Put
-        completed_callbacks_.push({pw.callback, 0});
-    }
 }
 
 void IoSubmitter::SubmitRead(uint16_t file_id, uint64_t offset, uint32_t pages, void* buffer,
@@ -93,15 +73,8 @@ void IoSubmitter::SubmitRead(uint16_t file_id, uint64_t offset, uint32_t pages, 
     ctx->buffer = buffer;
     ctx->callback = std::move(callback);
     pending_reads_.push(ctx);
-
-    if (simulation_mode_) {
-        // In simulation mode, complete immediately
-        // Data should already be in the buffer (managed by Engine)
-        completed_callbacks_.push({ctx->callback, 0});
-    }
 }
 
-#ifdef WITH_SPDK
 void IoSubmitter::SubmitBlobRead(spdk_blob* blob, uint64_t offset, uint32_t pages, void* buffer,
                                  IoCompletionCallback callback) {
     if (!blob || !io_channel_ || !blobstore_) {
@@ -133,17 +106,14 @@ void IoSubmitter::SubmitBlobRead(spdk_blob* blob, uint64_t offset, uint32_t page
             },
             ctx);
 }
-#endif
 
 size_t IoSubmitter::ProcessCompletions(size_t max_completions) {
     size_t count = 0;
 
-#ifdef WITH_SPDK
-    if (!simulation_mode_ && qpair_) {
+    if (qpair_) {
         // Process NVMe completions
         count = spdk_nvme_qpair_process_completions(qpair_, max_completions);
     }
-#endif
 
     // Process simulation callbacks
     while (!completed_callbacks_.empty() && count < max_completions) {
@@ -166,26 +136,11 @@ size_t IoSubmitter::ProcessCompletions(size_t max_completions) {
 }
 
 void IoSubmitter::FlushPendingWrites() {
-    if (simulation_mode_) {
-        // In simulation mode, complete all pending writes immediately
-        while (!pending_writes_.empty()) {
-            auto& pw = pending_writes_.front();
-            if (pw.callback) {
-                pw.callback(0);
-            }
-            pending_writes_.pop();
-        }
-    }
-#ifdef WITH_SPDK
-    else {
-        // Submit batch to NVMe
-        SubmitBatch();
-    }
-#endif
+    // Submit batch to NVMe
+    SubmitBatch();
 }
 
 void IoSubmitter::SubmitBatch() {
-#ifdef WITH_SPDK
     if (pending_writes_.empty() || !io_channel_) {
         return;
     }
@@ -209,8 +164,7 @@ void IoSubmitter::SubmitBatch() {
             uint64_t length_units = pw.buffer->Used() / io_unit_size;
 
             spdk_blob_io_write(
-                    pw.contexts[0].blob, io_channel_, pw.buffer->Data(), offset_units,
-                    length_units,
+                    pw.contexts[0].blob, io_channel_, pw.buffer->Data(), offset_units, length_units,
                     [](void* arg, int bserrno) {
                         auto* ctx = static_cast<WriteCompletionCtx*>(arg);
                         if (ctx->callback) {
@@ -229,7 +183,6 @@ void IoSubmitter::SubmitBatch() {
 
     // Process any immediate completions
     spdk_nvme_qpair_process_completions(qpair_, 0);
-#endif
 }
 
 void IoSubmitter::OnWriteComplete(int status, const std::vector<WriteContext>& contexts) {

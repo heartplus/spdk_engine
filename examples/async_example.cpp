@@ -78,8 +78,8 @@ enum class TaskType { kPut, kGet, kDelete, kStop };
 struct Task {
     TaskType type;
     uint64_t key;
-    std::vector<char> value;       // For Put: value to write
-    std::vector<char>* read_buf;   // For Get: buffer to read into
+    std::vector<char> value;      // For Put: value to write
+    std::vector<char>* read_buf;  // For Get: buffer to read into
     uint32_t value_len;
     uint64_t task_id;
 };
@@ -214,9 +214,9 @@ void MainThreadLoop() {
 struct WorkerConfig {
     int total_ops;
     int max_inflight;
-    int put_ratio;   // percentage (0-100)
-    int get_ratio;   // percentage (0-100)
-    int del_ratio;   // percentage (0-100)
+    int put_ratio;  // percentage (0-100)
+    int get_ratio;  // percentage (0-100)
+    int del_ratio;  // percentage (0-100)
 };
 
 void WorkerThreadLoop(const WorkerConfig& config) {
@@ -484,31 +484,21 @@ int main(int argc, char** argv) {
     std::cout << "========================================" << std::endl;
     std::cout << std::endl;
 
-    bool spdk_mode = false;
+    std::cout << "Initializing SPDK environment..." << std::endl;
 
-#ifdef WITH_SPDK
-    if (!bdev_name.empty() && !force_simulation) {
-        std::cout << "Initializing SPDK environment..." << std::endl;
+    SpdkEnvOpts spdk_opts;
+    spdk_opts.name = "spsc_example";
+    spdk_opts.bdev_name = bdev_name;
 
-        SpdkEnvOpts spdk_opts;
-        spdk_opts.name = "spsc_example";
-        spdk_opts.bdev_name = bdev_name;
-
-        auto& env = SpdkEnv::Instance();
-        if (env.Initialize(spdk_opts)) {
-            std::cout << "SPDK initialized with bdev: " << bdev_name << std::endl;
-            spdk_mode = true;
-        } else {
-            std::cerr << "Failed to initialize SPDK. Using simulation mode." << std::endl;
-        }
-    }
-#endif
-
-    if (!spdk_mode) {
-        std::cout << "Running in SIMULATION mode" << std::endl;
+    auto& env = SpdkEnv::Instance();
+    if (env.Initialize(spdk_opts)) {
+        std::cout << "SPDK initialized with bdev: " << bdev_name << std::endl;
     } else {
-        std::cout << "Running in SPDK mode" << std::endl;
+        std::cerr << "Failed to initialize SPDK" << std::endl;
+        return -1;
     }
+
+    std::cout << "Running in SPDK mode" << std::endl;
 
     std::cout << std::endl;
     std::cout << "Configuration:" << std::endl;
@@ -561,12 +551,8 @@ int main(int argc, char** argv) {
     engine.Close();
     std::cout << "Engine closed!" << std::endl;
 
-#ifdef WITH_SPDK
-    if (spdk_mode) {
-        std::cout << "Cleaning up SPDK environment..." << std::endl;
-        SpdkEnv::Instance().Cleanup();
-    }
-#endif
+    std::cout << "Cleaning up SPDK environment..." << std::endl;
+    SpdkEnv::Instance().Cleanup();
 
     std::cout << std::endl;
     std::cout << "=== SPSC Example completed! ===" << std::endl;

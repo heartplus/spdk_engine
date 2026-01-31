@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <spdk/blob.h>
+#include <spdk/env.h>
+#include <spdk/nvme.h>
+
 #include <cstdint>
 #include <functional>
 #include <queue>
@@ -11,12 +15,6 @@
 #include "spdk_kv/append_buffer.h"
 #include "spdk_kv/entry.h"
 #include "spdk_kv/types.h"
-
-#ifdef WITH_SPDK
-#include <spdk/blob.h>
-#include <spdk/env.h>
-#include <spdk/nvme.h>
-#endif
 
 namespace spdk_kv {
 
@@ -40,9 +38,7 @@ struct WriteContext {
     uint32_t old_offset_index;
     MemIndexEntry new_entry;
 
-#ifdef WITH_SPDK
     spdk_blob* blob;  // Blob handle for this write
-#endif
 
     bool is_compaction() const { return (flags & 0x01) != 0; }
 };
@@ -57,9 +53,7 @@ struct ReadContext {
     uint16_t file_id;
     uint64_t offset;
     uint32_t pages;
-#ifdef WITH_SPDK
     spdk_blob* blob;  // Blob handle for this read
-#endif
 };
 
 // IO Submitter for batching and submitting IO operations
@@ -74,13 +68,11 @@ public:
     IoSubmitter(const IoSubmitter&) = delete;
     IoSubmitter& operator=(const IoSubmitter&) = delete;
 
-#ifdef WITH_SPDK
     // Initialize with SPDK resources
     bool Initialize(spdk_nvme_ctrlr* ctrlr, spdk_nvme_ns* ns, spdk_blob_store* blobstore);
 
     // Get IO channel
     spdk_io_channel* GetChannel() { return io_channel_; }
-#endif
 
     // Initialize for simulation mode
     bool InitializeSimulation();
@@ -93,11 +85,9 @@ public:
     void SubmitRead(uint16_t file_id, uint64_t offset, uint32_t pages, void* buffer,
                     IoCompletionCallback callback);
 
-#ifdef WITH_SPDK
     // Submit a read request with blob handle (SPDK mode)
     void SubmitBlobRead(spdk_blob* blob, uint64_t offset, uint32_t pages, void* buffer,
                         IoCompletionCallback callback);
-#endif
 
     // Process completions (call in polling loop)
     // Returns number of completions processed
@@ -123,17 +113,12 @@ private:
     void OnWriteComplete(int status, const std::vector<WriteContext>& contexts);
     void OnReadComplete(int status, ReadContext* ctx);
 
-#ifdef WITH_SPDK
     // SPDK resources
     spdk_nvme_ctrlr* ctrlr_;
     spdk_nvme_ns* ns_;
     spdk_nvme_qpair* qpair_;
     spdk_blob_store* blobstore_;
     spdk_io_channel* io_channel_;
-#endif
-
-    // Simulation mode data
-    bool simulation_mode_;
 
     // Pending operations
     struct PendingWrite {

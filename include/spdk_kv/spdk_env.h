@@ -3,23 +3,21 @@
 
 #pragma once
 
+#include <spdk/bdev.h>
+#include <spdk/blob.h>
+#include <spdk/blob_bdev.h>
+#include <spdk/env.h>
+#include <spdk/event.h>
+#include <spdk/nvme.h>
+#include <spdk/stdinc.h>
+#include <spdk/thread.h>
+
 #include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
 
 #include "spdk_kv/types.h"
-
-#ifdef WITH_SPDK
-#include <spdk/blob.h>
-#include <spdk/blob_bdev.h>
-#include <spdk/bdev.h>
-#include <spdk/env.h>
-#include <spdk/event.h>
-#include <spdk/nvme.h>
-#include <spdk/stdinc.h>
-#include <spdk/thread.h>
-#endif
 
 namespace spdk_kv {
 
@@ -52,7 +50,6 @@ public:
     // Check if initialized
     bool IsInitialized() const { return initialized_; }
 
-#ifdef WITH_SPDK
     // Get blob store
     spdk_blob_store* GetBlobStore() { return blobstore_; }
 
@@ -82,8 +79,7 @@ public:
     void DeleteBlob(uint64_t blob_id, std::function<void(int status)> callback);
 
     // Resize blob
-    void ResizeBlob(spdk_blob* blob, uint64_t clusters,
-                    std::function<void(int status)> callback);
+    void ResizeBlob(spdk_blob* blob, uint64_t clusters, std::function<void(int status)> callback);
 
     // Sync blob metadata
     void SyncBlobMd(spdk_blob* blob, std::function<void(int status)> callback);
@@ -96,8 +92,6 @@ public:
 
     // Free DMA memory
     void FreeDmaBuffer(void* buffer);
-
-#endif
 
     // Polling loop - process all pending events
     void Poll();
@@ -116,7 +110,6 @@ private:
     SpdkEnv(const SpdkEnv&) = delete;
     SpdkEnv& operator=(const SpdkEnv&) = delete;
 
-#ifdef WITH_SPDK
     // Internal initialization callbacks
     static void OnBdevInitComplete(void* arg, int rc);
     static void OnBlobStoreLoadComplete(void* arg, struct spdk_blob_store* bs, int bserrno);
@@ -135,7 +128,6 @@ private:
     spdk_io_channel* io_channel_;
     spdk_bdev* bdev_;
     spdk_bdev_desc* bdev_desc_;
-#endif
 
     bool initialized_;
     bool polling_;

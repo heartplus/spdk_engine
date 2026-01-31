@@ -22,7 +22,6 @@ set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
 # Option for SPDK integration (enabled by default)
-option(WITH_SPDK "Build with SPDK support" ON)
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)

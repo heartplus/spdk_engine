@@ -49,9 +49,7 @@ bool IndexLoader::Poll() {
     return !IsComplete();
 }
 
-void IndexLoader::TransitionTo(State new_state) {
-    state_ = new_state;
-}
+void IndexLoader::TransitionTo(State new_state) { state_ = new_state; }
 
 void IndexLoader::LoadSuperblockPrimary() {
     // In simulation mode, superblock is already set via SetSuperblock()
@@ -237,9 +235,8 @@ void IndexLoader::ScanNextFile() {
     if (data && size > current_scan_offset_) {
         // Parse entries from this file
         size_t entries_found =
-                ParseAndRebuildEntries(data + current_scan_offset_,
-                                       size - current_scan_offset_, range.file_id,
-                                       current_scan_offset_);
+                ParseAndRebuildEntries(data + current_scan_offset_, size - current_scan_offset_,
+                                       range.file_id, current_scan_offset_);
         (void)entries_found;
     }
 
@@ -248,8 +245,8 @@ void IndexLoader::ScanNextFile() {
     ScanNextFile();
 }
 
-size_t IndexLoader::ParseAndRebuildEntries(const void* buffer, size_t buffer_size,
-                                           uint16_t file_id, uint64_t base_offset) {
+size_t IndexLoader::ParseAndRebuildEntries(const void* buffer, size_t buffer_size, uint16_t file_id,
+                                           uint64_t base_offset) {
     const char* ptr = static_cast<const char*>(buffer);
     size_t offset = 0;
     size_t entries_processed = 0;
@@ -270,14 +267,13 @@ size_t IndexLoader::ParseAndRebuildEntries(const void* buffer, size_t buffer_siz
 
         // Parse entry
         uint64_t key = *reinterpret_cast<const uint64_t*>(ptr + offset + sizeof(EntryHeader));
-        uint32_t value_len = *reinterpret_cast<const uint32_t*>(
-                ptr + offset + sizeof(EntryHeader) + sizeof(uint64_t));
+        uint32_t value_len = *reinterpret_cast<const uint32_t*>(ptr + offset + sizeof(EntryHeader) +
+                                                                sizeof(uint64_t));
 
         // Calculate entry size
-        size_t entry_size =
-                AlignUp(sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t) + value_len +
-                                sizeof(uint32_t),
-                        kPageSize);
+        size_t entry_size = AlignUp(sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t) +
+                                            value_len + sizeof(uint32_t),
+                                    kPageSize);
 
         // Boundary check
         if (offset + entry_size > buffer_size) {

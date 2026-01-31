@@ -61,15 +61,17 @@ struct FileInfo {
     uint64_t write_offset;
     std::vector<char> data;  // In-memory storage for simulation
 
-#ifdef WITH_SPDK
-    spdk_blob* blob;     // SPDK blob handle
-    bool blob_opened;    // Whether blob is opened
+    spdk_blob* blob;   // SPDK blob handle
+    bool blob_opened;  // Whether blob is opened
 
-    FileInfo() : file_id(0), blob_id(0), state(FileState::kActive), size(0),
-                 write_offset(0), blob(nullptr), blob_opened(false) {}
-#else
-    FileInfo() : file_id(0), blob_id(0), state(FileState::kActive), size(0), write_offset(0) {}
-#endif
+    FileInfo()
+            : file_id(0),
+              blob_id(0),
+              state(FileState::kActive),
+              size(0),
+              write_offset(0),
+              blob(nullptr),
+              blob_opened(false) {}
 
     bool IsWritable() const { return state == FileState::kActive; }
     bool IsReadable() const {
@@ -150,7 +152,6 @@ private:
     FileInfo* GetFile(uint16_t file_id);
     FileInfo* AllocateNewFile();
 
-#ifdef WITH_SPDK
     // SPDK blob management
     void AllocateBlobForFile(FileInfo* file, std::function<void(bool success)> callback);
     void OpenBlobForFile(FileInfo* file, std::function<void(bool success)> callback);
@@ -164,7 +165,6 @@ private:
 
     // Get SPDK blob for a file
     spdk_blob* GetBlobForFile(uint16_t file_id);
-#endif
 
     // Entry building
     void BuildEntryInplace(void* slot, uint64_t key, const void* value, uint32_t len, uint32_t seq,
@@ -214,13 +214,8 @@ private:
     // Pending async operations (for tracking in-flight requests)
     size_t pending_foreground_count_;
 
-#ifdef WITH_SPDK
-    // SPDK mode flag
-    bool simulation_mode_;
-
     // Pending blob operations count
     size_t pending_blob_ops_;
-#endif
 };
 
 // C-style API wrapper (for compatibility)

@@ -19,19 +19,15 @@ SpdkEnv& SpdkEnv::Instance() {
 }
 
 SpdkEnv::SpdkEnv()
-        :
-#ifdef WITH_SPDK
-          ctrlr_(nullptr),
+        : ctrlr_(nullptr),
           ns_(nullptr),
           qpair_(nullptr),
           blobstore_(nullptr),
           io_channel_(nullptr),
           bdev_(nullptr),
           bdev_desc_(nullptr),
-#endif
           initialized_(false),
-          polling_(false) {
-}
+          polling_(false) {}
 
 SpdkEnv::~SpdkEnv() {
     if (initialized_) {
@@ -46,7 +42,6 @@ bool SpdkEnv::Initialize(const SpdkEnvOpts& opts) {
 
     opts_ = opts;
 
-#ifdef WITH_SPDK
     // Initialize SPDK environment
     struct spdk_env_opts spdk_opts;
     spdk_env_opts_init(&spdk_opts);
@@ -117,12 +112,6 @@ bool SpdkEnv::Initialize(const SpdkEnvOpts& opts) {
 
     initialized_ = true;
     return true;
-
-#else
-    // Simulation mode - no real SPDK
-    initialized_ = true;
-    return true;
-#endif
 }
 
 void SpdkEnv::Cleanup() {
@@ -130,7 +119,6 @@ void SpdkEnv::Cleanup() {
         return;
     }
 
-#ifdef WITH_SPDK
     if (io_channel_) {
         spdk_bs_free_io_channel(io_channel_);
         io_channel_ = nullptr;
@@ -143,11 +131,14 @@ void SpdkEnv::Cleanup() {
         };
         BsUnloadCtx unload_ctx = {false};
 
-        spdk_bs_unload(blobstore_, [](void* arg, int bserrno) {
-            auto* ctx = static_cast<BsUnloadCtx*>(arg);
-            (void)bserrno;
-            ctx->done = true;
-        }, &unload_ctx);
+        spdk_bs_unload(
+                blobstore_,
+                [](void* arg, int bserrno) {
+                    auto* ctx = static_cast<BsUnloadCtx*>(arg);
+                    (void)bserrno;
+                    ctx->done = true;
+                },
+                &unload_ctx);
 
         while (!unload_ctx.done) {
             // Process events
@@ -167,29 +158,20 @@ void SpdkEnv::Cleanup() {
     }
 
     spdk_env_fini();
-#endif
 
     initialized_ = false;
 }
 
 void SpdkEnv::Poll() {
-#ifdef WITH_SPDK
     // Process completions
     if (qpair_) {
         spdk_nvme_qpair_process_completions(qpair_, 0);
     }
-#endif
 }
 
-void SpdkEnv::StartPolling() {
-    polling_ = true;
-}
+void SpdkEnv::StartPolling() { polling_ = true; }
 
-void SpdkEnv::StopPolling() {
-    polling_ = false;
-}
-
-#ifdef WITH_SPDK
+void SpdkEnv::StopPolling() { polling_ = false; }
 
 int SpdkEnv::ProcessCompletions(uint32_t max_completions) {
     if (!qpair_) {
@@ -202,9 +184,7 @@ void* SpdkEnv::AllocDmaBuffer(size_t size, size_t alignment) {
     return spdk_dma_zmalloc(size, alignment, nullptr);
 }
 
-void SpdkEnv::FreeDmaBuffer(void* buffer) {
-    spdk_dma_free(buffer);
-}
+void SpdkEnv::FreeDmaBuffer(void* buffer) { spdk_dma_free(buffer); }
 
 void SpdkEnv::AllocateBlob(uint64_t size, std::function<void(uint64_t blob_id)> callback) {
     if (!blobstore_) {
@@ -380,43 +360,21 @@ void SpdkEnv::OnBlobSyncComplete(void* arg, int bserrno) {
     delete ctx;
 }
 
-#endif  // WITH_SPDK
-
 // ============================================================================
 // DmaAllocator implementation
 // ============================================================================
 
 void* DmaAllocator::Alloc(size_t size, size_t alignment) {
-#ifdef WITH_SPDK
     return spdk_dma_malloc(size, alignment, nullptr);
-#else
-    void* ptr = nullptr;
-    if (posix_memalign(&ptr, alignment, size) != 0) {
-        return nullptr;
-    }
-    return ptr;
-#endif
 }
 
 void DmaAllocator::Free(void* ptr) {
     if (!ptr) return;
-#ifdef WITH_SPDK
     spdk_dma_free(ptr);
-#else
-    free(ptr);
-#endif
 }
 
 void* DmaAllocator::AllocZeroed(size_t size, size_t alignment) {
-#ifdef WITH_SPDK
     return spdk_dma_zmalloc(size, alignment, nullptr);
-#else
-    void* ptr = Alloc(size, alignment);
-    if (ptr) {
-        std::memset(ptr, 0, size);
-    }
-    return ptr;
-#endif
 }
 
 }  // namespace spdk_kv
