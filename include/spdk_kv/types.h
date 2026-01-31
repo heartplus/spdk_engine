@@ -30,8 +30,8 @@ constexpr uint32_t kSegmentMagic = 0x53454748;         // "SEGH"
 
 // Superblock layout
 constexpr uint64_t kSuperblockPrimaryOffset = 0;
-constexpr uint64_t kSuperblockBackupOffset = 4 * 1024 * 1024;   // 4MB
-constexpr uint64_t kSuperblockBlobSize = 8 * 1024 * 1024;       // 8MB
+constexpr uint64_t kSuperblockBackupOffset = 4 * 1024 * 1024;  // 4MB
+constexpr uint64_t kSuperblockBlobSize = 8 * 1024 * 1024;      // 8MB
 
 // MemIndex configuration
 constexpr size_t kMemIndexSegmentSize = 1ULL * 1024 * 1024 * 1024;  // 1GB

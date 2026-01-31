@@ -14,6 +14,15 @@ AccessModifierOffset: -4
 Standard:        Cpp11
 TabWidth:        4
 UseTab:          Never
+
+# 要求在 if, else, for, while 等语句后必须有大括号
+# 注意：此选项在 clang-format 15+ 版本中生效
+InsertBraces: true
+
+# 配合以下设置可以确保即便是一行代码也不会被挤在同一行
+AllowShortBlocksOnASingleLine: Never
+AllowShortIfStatementsOnASingleLine: Never
+
 ---
 Language: Proto
 BasedOnStyle:  Google

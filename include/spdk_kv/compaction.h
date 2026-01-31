@@ -52,7 +52,9 @@ private:
         bool Test(size_t idx) const { return (data[idx / 64] & (1ULL << (idx % 64))) != 0; }
         bool IsEmpty() const {
             for (auto d : data) {
-                if (d) return false;
+                if (d) {
+                    return false;
+                }
             }
             return true;
         }
@@ -95,7 +97,9 @@ struct FileMetadata {
 
     // Calculate garbage ratio
     double GarbageRatio() const {
-        if (total_bytes == 0) return 0.0;
+        if (total_bytes == 0) {
+            return 0.0;
+        }
         return 1.0 - static_cast<double>(valid_bytes) / total_bytes;
     }
 

@@ -310,14 +310,15 @@ KvError Engine::LoadSuperblock() {
     };
     GetSuperCtx get_ctx{SPDK_BLOBID_INVALID, 0, false};
 
-    spdk_bs_get_super(env.GetBlobStore(),
-                      [](void* arg, spdk_blob_id blobid, int bserrno) {
-                          auto* ctx = static_cast<GetSuperCtx*>(arg);
-                          ctx->blob_id = blobid;
-                          ctx->status = bserrno;
-                          ctx->done = true;
-                      },
-                      &get_ctx);
+    spdk_bs_get_super(
+            env.GetBlobStore(),
+            [](void* arg, spdk_blob_id blobid, int bserrno) {
+                auto* ctx = static_cast<GetSuperCtx*>(arg);
+                ctx->blob_id = blobid;
+                ctx->status = bserrno;
+                ctx->done = true;
+            },
+            &get_ctx);
 
     while (!get_ctx.done) {
         env.Poll();
@@ -337,14 +338,15 @@ KvError Engine::LoadSuperblock() {
     };
     OpenCtx open_ctx{nullptr, 0, false};
 
-    spdk_bs_open_blob(env.GetBlobStore(), superblock_blob_id_,
-                      [](void* arg, struct spdk_blob* blob, int bserrno) {
-                          auto* ctx = static_cast<OpenCtx*>(arg);
-                          ctx->blob = blob;
-                          ctx->status = bserrno;
-                          ctx->done = true;
-                      },
-                      &open_ctx);
+    spdk_bs_open_blob(
+            env.GetBlobStore(), superblock_blob_id_,
+            [](void* arg, struct spdk_blob* blob, int bserrno) {
+                auto* ctx = static_cast<OpenCtx*>(arg);
+                ctx->blob = blob;
+                ctx->status = bserrno;
+                ctx->done = true;
+            },
+            &open_ctx);
 
     while (!open_ctx.done) {
         env.Poll();
@@ -378,14 +380,15 @@ KvError Engine::LoadSuperblock() {
     };
     ReadCtx read_ctx{0, false};
 
-    spdk_blob_io_read(superblock_blob_, channel, read_buf, kSuperblockPrimaryOffset / io_unit_size,
-                      length_units,
-                      [](void* arg, int bserrno) {
-                          auto* ctx = static_cast<ReadCtx*>(arg);
-                          ctx->status = bserrno;
-                          ctx->done = true;
-                      },
-                      &read_ctx);
+    spdk_blob_io_read(
+            superblock_blob_, channel, read_buf, kSuperblockPrimaryOffset / io_unit_size,
+            length_units,
+            [](void* arg, int bserrno) {
+                auto* ctx = static_cast<ReadCtx*>(arg);
+                ctx->status = bserrno;
+                ctx->done = true;
+            },
+            &read_ctx);
 
     while (!read_ctx.done) {
         env.Poll();
@@ -408,14 +411,15 @@ KvError Engine::LoadSuperblock() {
     // Step 4: Primary invalid, try backup superblock at kSuperblockBackupOffset
     ReadCtx backup_ctx{0, false};
 
-    spdk_blob_io_read(superblock_blob_, channel, read_buf, kSuperblockBackupOffset / io_unit_size,
-                      length_units,
-                      [](void* arg, int bserrno) {
-                          auto* ctx = static_cast<ReadCtx*>(arg);
-                          ctx->status = bserrno;
-                          ctx->done = true;
-                      },
-                      &backup_ctx);
+    spdk_blob_io_read(
+            superblock_blob_, channel, read_buf, kSuperblockBackupOffset / io_unit_size,
+            length_units,
+            [](void* arg, int bserrno) {
+                auto* ctx = static_cast<ReadCtx*>(arg);
+                ctx->status = bserrno;
+                ctx->done = true;
+            },
+            &backup_ctx);
 
     while (!backup_ctx.done) {
         env.Poll();
@@ -482,17 +486,16 @@ KvError Engine::RebuildFileInfo() {
         // Open the existing blob (without writing header - data already on disk)
         pending_opens++;
         pending_blob_ops_++;
-        env.OpenBlob(ptr->blob_id,
-                     [this, ptr, &pending_opens, &open_error](spdk_blob* blob) {
-                         pending_blob_ops_--;
-                         pending_opens--;
-                         if (!blob) {
-                             open_error = true;
-                             return;
-                         }
-                         ptr->blob = blob;
-                         ptr->blob_opened = true;
-                     });
+        env.OpenBlob(ptr->blob_id, [this, ptr, &pending_opens, &open_error](spdk_blob* blob) {
+            pending_blob_ops_--;
+            pending_opens--;
+            if (!blob) {
+                open_error = true;
+                return;
+            }
+            ptr->blob = blob;
+            ptr->blob_opened = true;
+        });
     }
 
     // Wait for all blob opens to complete
@@ -838,12 +841,16 @@ KvError Engine::Delete(uint64_t key) {
 void Engine::PutAsync(uint64_t key, const void* value, uint32_t value_len, KvCallback cb,
                       void* cb_arg) {
     if (state_ != EngineState::kReady) {
-        if (cb) cb(cb_arg, static_cast<int>(KvError::kEngineNotReady));
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kEngineNotReady));
+        }
         return;
     }
 
     if (value_len == 0 || !value) {
-        if (cb) cb(cb_arg, static_cast<int>(KvError::kInvalidArgument));
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kInvalidArgument));
+        }
         return;
     }
 
@@ -861,7 +868,9 @@ void Engine::PutAsync(uint64_t key, const void* value, uint32_t value_len, KvCal
         }
         file = AllocateNewFile();
         if (!file) {
-            if (cb) cb(cb_arg, static_cast<int>(KvError::kNoSpace));
+            if (cb) {
+                cb(cb_arg, static_cast<int>(KvError::kNoSpace));
+            }
             return;
         }
         active_file_id_ = file->file_id;
@@ -870,7 +879,9 @@ void Engine::PutAsync(uint64_t key, const void* value, uint32_t value_len, KvCal
     // Allocate DMA buffer for the entry
     void* dma_buffer = DmaAllocator::AllocZeroed(aligned_size, kPageSize);
     if (!dma_buffer) {
-        if (cb) cb(cb_arg, static_cast<int>(KvError::kInternalError));
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kInternalError));
+        }
         return;
     }
 
@@ -919,7 +930,9 @@ void Engine::PutAsync(uint64_t key, const void* value, uint32_t value_len, KvCal
                             mem_index_->Upsert(key, entry);
                         }
 
-                        if (cb) cb(cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
+                        if (cb) {
+                            cb(cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
+                        }
                     });
     return;
 }
@@ -927,31 +940,41 @@ void Engine::PutAsync(uint64_t key, const void* value, uint32_t value_len, KvCal
 void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCallback cb,
                       void* cb_arg) {
     if (state_ != EngineState::kReady) {
-        if (cb) cb(cb_arg, static_cast<int>(KvError::kEngineNotReady), 0);
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kEngineNotReady), 0);
+        }
         return;
     }
 
     if (!value_buf || buf_len == 0) {
-        if (cb) cb(cb_arg, static_cast<int>(KvError::kInvalidArgument), 0);
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kInvalidArgument), 0);
+        }
         return;
     }
 
     // Find in index
     MemIndexEntry* entry = mem_index_->Find(key);
     if (!entry) {
-        if (cb) cb(cb_arg, static_cast<int>(KvError::kKeyNotFound), 0);
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kKeyNotFound), 0);
+        }
         return;
     }
 
     if (entry->is_deleted()) {
-        if (cb) cb(cb_arg, static_cast<int>(KvError::kKeyNotFound), 0);
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kKeyNotFound), 0);
+        }
         return;
     }
 
     // Get file
     FileInfo* file = GetFile(entry->file_id);
     if (!file || !file->IsReadable() || !file->blob_opened) {
-        if (cb) cb(cb_arg, static_cast<int>(KvError::kIoError), 0);
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kIoError), 0);
+        }
         return;
     }
 
@@ -962,7 +985,9 @@ void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCall
     // Allocate DMA buffer for reading
     void* dma_buffer = DmaAllocator::Alloc(read_size, kPageSize);
     if (!dma_buffer) {
-        if (cb) cb(cb_arg, static_cast<int>(KvError::kInternalError), 0);
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kInternalError), 0);
+        }
         return;
     }
 
@@ -971,13 +996,16 @@ void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCall
     pending_foreground_count_++;
 
     // Submit async blob read
+    // TODO: 改成 非lamda 函数
     SubmitBlobRead(file, offset, dma_buffer, read_size,
                    [this, dma_buffer, value_buf, buf_len, cb, cb_arg](int status) {
                        pending_foreground_count_--;
 
                        if (status != 0) {
                            DmaAllocator::Free(dma_buffer);
-                           if (cb) cb(cb_arg, static_cast<int>(KvError::kIoError), 0);
+                           if (cb) {
+                               cb(cb_arg, static_cast<int>(KvError::kIoError), 0);
+                           }
                            return;
                        }
 
@@ -985,7 +1013,9 @@ void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCall
                        auto* header = static_cast<EntryHeader*>(dma_buffer);
                        if (!header->is_valid()) {
                            DmaAllocator::Free(dma_buffer);
-                           if (cb) cb(cb_arg, static_cast<int>(KvError::kCorruption), 0);
+                           if (cb) {
+                               cb(cb_arg, static_cast<int>(KvError::kCorruption), 0);
+                           }
                            return;
                        }
 
@@ -996,7 +1026,9 @@ void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCall
 
                        if (value_len > buf_len) {
                            DmaAllocator::Free(dma_buffer);
-                           if (cb) cb(cb_arg, static_cast<int>(KvError::kValueTooLarge), value_len);
+                           if (cb) {
+                               cb(cb_arg, static_cast<int>(KvError::kValueTooLarge), value_len);
+                           }
                            return;
                        }
 
@@ -1006,86 +1038,94 @@ void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCall
                        std::memcpy(value_buf, value_ptr, value_len);
 
                        DmaAllocator::Free(dma_buffer);
-                       if (cb) cb(cb_arg, 0, value_len);
+                       if (cb) {
+                           cb(cb_arg, 0, value_len);
+                       }
                    });
     return;
 }
 
 void Engine::DeleteAsync(uint64_t key, KvCallback cb, void* cb_arg) {
-    {
-        if (state_ != EngineState::kReady) {
-            if (cb) cb(cb_arg, static_cast<int>(KvError::kEngineNotReady));
-            return;
+    if (state_ != EngineState::kReady) {
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kEngineNotReady));
         }
-
-        // Check if key exists
-        MemIndexEntry* existing = mem_index_->Find(key);
-        if (!existing) {
-            if (cb) cb(cb_arg, static_cast<int>(KvError::kKeyNotFound));
-            return;
-        }
-
-        // Calculate tombstone size
-        size_t header_size = sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t);
-        size_t entry_size = header_size + sizeof(uint32_t);  // +checksum
-        size_t aligned_size = AlignUp(entry_size, kPageSize);
-
-        // Get active file
-        FileInfo* file = GetActiveFile();
-        if (!file || !file->blob_opened ||
-            file->write_offset + aligned_size > config_.data_file_size) {
-            if (file) {
-                file->state = FileState::kSealed;
-            }
-            file = AllocateNewFile();
-            if (!file) {
-                if (cb) cb(cb_arg, static_cast<int>(KvError::kNoSpace));
-                return;
-            }
-            active_file_id_ = file->file_id;
-        }
-
-        // Allocate DMA buffer for the tombstone entry
-        void* dma_buffer = DmaAllocator::AllocZeroed(aligned_size, kPageSize);
-        if (!dma_buffer) {
-            if (cb) cb(cb_arg, static_cast<int>(KvError::kInternalError));
-            return;
-        }
-
-        // Allocate sequence number
-        uint32_t seq = mem_index_->AllocateSequence();
-
-        // Build tombstone entry in DMA buffer
-        BuildEntryInplace(dma_buffer, key, nullptr, 0, seq, true);
-
-        // Track garbage from the old entry
-        uint64_t old_size = existing->page_count * kPageSize;
-        uint64_t write_offset = file->write_offset;
-
-        // Update write offset before async operation
-        file->write_offset += aligned_size;
-        file->size = file->write_offset;
-        total_data_bytes_ += aligned_size;
-
-        pending_foreground_count_++;
-
-        // Submit async blob write
-        SubmitBlobWrite(file, write_offset, dma_buffer, static_cast<uint32_t>(aligned_size),
-                        [this, key, dma_buffer, old_size, cb, cb_arg](int status) {
-                            DmaAllocator::Free(dma_buffer);
-                            pending_foreground_count_--;
-
-                            if (status == 0) {
-                                // Remove from index on successful write
-                                mem_index_->Remove(key);
-                                total_garbage_bytes_ += old_size;
-                            }
-
-                            if (cb)
-                                cb(cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
-                        });
         return;
     }
+
+    // Check if key exists
+    MemIndexEntry* existing = mem_index_->Find(key);
+    if (!existing) {
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kKeyNotFound));
+        }
+        return;
+    }
+
+    // Calculate tombstone size
+    size_t header_size = sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t);
+    size_t entry_size = header_size + sizeof(uint32_t);  // +checksum
+    size_t aligned_size = AlignUp(entry_size, kPageSize);
+
+    // Get active file
+    FileInfo* file = GetActiveFile();
+    if (!file || !file->blob_opened || file->write_offset + aligned_size > config_.data_file_size) {
+        if (file) {
+            file->state = FileState::kSealed;
+        }
+        file = AllocateNewFile();
+        if (!file) {
+            if (cb) {
+                cb(cb_arg, static_cast<int>(KvError::kNoSpace));
+            }
+            return;
+        }
+        active_file_id_ = file->file_id;
+    }
+
+    // Allocate DMA buffer for the tombstone entry
+    void* dma_buffer = DmaAllocator::AllocZeroed(aligned_size, kPageSize);
+    if (!dma_buffer) {
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kInternalError));
+        }
+        return;
+    }
+
+    // Allocate sequence number
+    uint32_t seq = mem_index_->AllocateSequence();
+
+    // Build tombstone entry in DMA buffer
+    BuildEntryInplace(dma_buffer, key, nullptr, 0, seq, true);
+
+    // Track garbage from the old entry
+    uint64_t old_size = existing->page_count * kPageSize;
+    uint64_t write_offset = file->write_offset;
+
+    // Update write offset before async operation
+    file->write_offset += aligned_size;
+    file->size = file->write_offset;
+    total_data_bytes_ += aligned_size;
+
+    pending_foreground_count_++;
+
+    // Submit async blob write
+    SubmitBlobWrite(file, write_offset, dma_buffer, static_cast<uint32_t>(aligned_size),
+                    [this, key, dma_buffer, old_size, cb, cb_arg](int status) {
+                        DmaAllocator::Free(dma_buffer);
+                        pending_foreground_count_--;
+
+                        if (status == 0) {
+                            // Remove from index on successful write
+                            mem_index_->Remove(key);
+                            total_garbage_bytes_ += old_size;
+                        }
+
+                        if (cb) {
+                            cb(cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
+                        }
+                    });
+    return;
 }
 
 void Engine::Poll() {
@@ -1116,14 +1156,18 @@ void Engine::Poll() {
 
 void Engine::StartCheckpoint(KvCallback cb, void* cb_arg) {
     if (!checkpoint_manager_) {
-        if (cb) cb(cb_arg, -1);
+        if (cb) {
+            cb(cb_arg, -1);
+        }
         return;
     }
 
     checkpoint_manager_->SetGlobalSequence(mem_index_->GetGlobalSequence());
 
     checkpoint_manager_->StartCheckpoint([cb, cb_arg](int status) {
-        if (cb) cb(cb_arg, status);
+        if (cb) {
+            cb(cb_arg, status);
+        }
     });
 }
 
@@ -1149,7 +1193,9 @@ void Engine::CheckCheckpointTrigger() {
 }
 
 void Engine::ScheduleCompaction(uint16_t file_id) {
-    if (!compaction_scheduler_) return;
+    if (!compaction_scheduler_) {
+        return;
+    }
 
     auto it = file_metadata_.find(file_id);
     if (it != file_metadata_.end()) {
@@ -1158,7 +1204,9 @@ void Engine::ScheduleCompaction(uint16_t file_id) {
 }
 
 size_t Engine::GetGarbageRatio() const {
-    if (total_data_bytes_ == 0) return 0;
+    if (total_data_bytes_ == 0) {
+        return 0;
+    }
     return (total_garbage_bytes_ * 100) / total_data_bytes_;
 }
 
@@ -1175,13 +1223,17 @@ double Engine::GetIndexLoadFactor() const { return mem_index_ ? mem_index_->Load
 
 void Engine::AllocateBlobForFile(FileInfo* file, std::function<void(bool success)> callback) {
     if (!file) {
-        if (callback) callback(false);
+        if (callback) {
+            callback(false);
+        }
         return;
     }
 
     auto& env = SpdkEnv::Instance();
     if (!env.IsInitialized()) {
-        if (callback) callback(false);
+        if (callback) {
+            callback(false);
+        }
         return;
     }
 
@@ -1192,7 +1244,9 @@ void Engine::AllocateBlobForFile(FileInfo* file, std::function<void(bool success
         pending_blob_ops_--;
 
         if (blob_id == SPDK_BLOBID_INVALID) {
-            if (callback) callback(false);
+            if (callback) {
+                callback(false);
+            }
             return;
         }
 
@@ -1205,23 +1259,30 @@ void Engine::AllocateBlobForFile(FileInfo* file, std::function<void(bool success
 
 void Engine::OpenBlobForFile(FileInfo* file, std::function<void(bool success)> callback) {
     if (!file) {
-        if (callback) callback(false);
+        if (callback) {
+            callback(false);
+        }
         return;
     }
 
     auto& env = SpdkEnv::Instance();
     if (!env.IsInitialized()) {
-        if (callback) callback(false);
+        if (callback) {
+            callback(false);
+        }
         return;
     }
 
     pending_blob_ops_++;
 
+    // TODO: 改成 非lamda 函数
     env.OpenBlob(file->blob_id, [this, file, callback](spdk_blob* blob) {
         pending_blob_ops_--;
 
         if (!blob) {
-            if (callback) callback(false);
+            if (callback) {
+                callback(false);
+            }
             return;
         }
 
@@ -1232,7 +1293,9 @@ void Engine::OpenBlobForFile(FileInfo* file, std::function<void(bool success)> c
         DataFileHeader* header =
                 static_cast<DataFileHeader*>(DmaAllocator::AllocZeroed(kPageSize, kPageSize));
         if (!header) {
-            if (callback) callback(false);
+            if (callback) {
+                callback(false);
+            }
             return;
         }
 
@@ -1248,20 +1311,26 @@ void Engine::OpenBlobForFile(FileInfo* file, std::function<void(bool success)> c
         // Write header to blob
         SubmitBlobWrite(file, 0, header, kPageSize, [header, callback](int status) {
             DmaAllocator::Free(header);
-            if (callback) callback(status == 0);
+            if (callback) {
+                callback(status == 0);
+            }
         });
     });
 }
 
 void Engine::CloseBlobForFile(FileInfo* file, std::function<void(bool success)> callback) {
     if (!file || !file->blob_opened || !file->blob) {
-        if (callback) callback(true);  // Not an error if no blob to close
+        if (callback) {
+            callback(true);  // Not an error if no blob to close
+        }
         return;
     }
 
     auto& env = SpdkEnv::Instance();
     if (!env.IsInitialized()) {
-        if (callback) callback(false);
+        if (callback) {
+            callback(false);
+        }
         return;
     }
 
@@ -1271,26 +1340,34 @@ void Engine::CloseBlobForFile(FileInfo* file, std::function<void(bool success)> 
         pending_blob_ops_--;
         file->blob = nullptr;
         file->blob_opened = false;
-        if (callback) callback(status == 0);
+        if (callback) {
+            callback(status == 0);
+        }
     });
 }
 
 void Engine::SubmitBlobWrite(FileInfo* file, uint64_t offset, void* data, uint32_t length,
                              std::function<void(int status)> callback) {
     if (!file || !file->blob || !file->blob_opened) {
-        if (callback) callback(-1);
+        if (callback) {
+            callback(-1);
+        }
         return;
     }
 
     auto& env = SpdkEnv::Instance();
     if (!env.IsInitialized() || !env.GetBlobStore()) {
-        if (callback) callback(-1);
+        if (callback) {
+            callback(-1);
+        }
         return;
     }
 
     auto* channel = io_submitter_->GetChannel();
     if (!channel) {
-        if (callback) callback(-1);
+        if (callback) {
+            callback(-1);
+        }
         return;
     }
 
@@ -1320,19 +1397,25 @@ void Engine::SubmitBlobWrite(FileInfo* file, uint64_t offset, void* data, uint32
 void Engine::SubmitBlobRead(FileInfo* file, uint64_t offset, void* buffer, uint32_t length,
                             std::function<void(int status)> callback) {
     if (!file || !file->blob || !file->blob_opened) {
-        if (callback) callback(-1);
+        if (callback) {
+            callback(-1);
+        }
         return;
     }
 
     auto& env = SpdkEnv::Instance();
     if (!env.IsInitialized() || !env.GetBlobStore()) {
-        if (callback) callback(-1);
+        if (callback) {
+            callback(-1);
+        }
         return;
     }
 
     auto* channel = io_submitter_->GetChannel();
     if (!channel) {
-        if (callback) callback(-1);
+        if (callback) {
+            callback(-1);
+        }
         return;
     }
 
@@ -1402,13 +1485,14 @@ KvError Engine::CreateSuperblockBlob() {
     };
     SetSuperCtx set_ctx{0, false};
 
-    spdk_bs_set_super(env.GetBlobStore(), superblock_blob_id_,
-                      [](void* arg, int bserrno) {
-                          auto* ctx = static_cast<SetSuperCtx*>(arg);
-                          ctx->status = bserrno;
-                          ctx->done = true;
-                      },
-                      &set_ctx);
+    spdk_bs_set_super(
+            env.GetBlobStore(), superblock_blob_id_,
+            [](void* arg, int bserrno) {
+                auto* ctx = static_cast<SetSuperCtx*>(arg);
+                ctx->status = bserrno;
+                ctx->done = true;
+            },
+            &set_ctx);
 
     while (!set_ctx.done) {
         env.Poll();
@@ -1426,14 +1510,15 @@ KvError Engine::CreateSuperblockBlob() {
     };
     OpenCtx open_ctx{nullptr, 0, false};
 
-    spdk_bs_open_blob(env.GetBlobStore(), superblock_blob_id_,
-                      [](void* arg, struct spdk_blob* blob, int bserrno) {
-                          auto* ctx = static_cast<OpenCtx*>(arg);
-                          ctx->blob = blob;
-                          ctx->status = bserrno;
-                          ctx->done = true;
-                      },
-                      &open_ctx);
+    spdk_bs_open_blob(
+            env.GetBlobStore(), superblock_blob_id_,
+            [](void* arg, struct spdk_blob* blob, int bserrno) {
+                auto* ctx = static_cast<OpenCtx*>(arg);
+                ctx->blob = blob;
+                ctx->status = bserrno;
+                ctx->done = true;
+            },
+            &open_ctx);
 
     while (!open_ctx.done) {
         env.Poll();
@@ -1482,14 +1567,15 @@ KvError Engine::WriteSuperblock() {
     // Write backup first (design: backup first, then primary)
     WriteCtx backup_ctx{0, false};
 
-    spdk_blob_io_write(superblock_blob_, channel, write_buf,
-                       kSuperblockBackupOffset / io_unit_size, length_units,
-                       [](void* arg, int bserrno) {
-                           auto* ctx = static_cast<WriteCtx*>(arg);
-                           ctx->status = bserrno;
-                           ctx->done = true;
-                       },
-                       &backup_ctx);
+    spdk_blob_io_write(
+            superblock_blob_, channel, write_buf, kSuperblockBackupOffset / io_unit_size,
+            length_units,
+            [](void* arg, int bserrno) {
+                auto* ctx = static_cast<WriteCtx*>(arg);
+                ctx->status = bserrno;
+                ctx->done = true;
+            },
+            &backup_ctx);
 
     while (!backup_ctx.done) {
         env.Poll();
@@ -1503,14 +1589,15 @@ KvError Engine::WriteSuperblock() {
     // Write primary
     WriteCtx primary_ctx{0, false};
 
-    spdk_blob_io_write(superblock_blob_, channel, write_buf,
-                       kSuperblockPrimaryOffset / io_unit_size, length_units,
-                       [](void* arg, int bserrno) {
-                           auto* ctx = static_cast<WriteCtx*>(arg);
-                           ctx->status = bserrno;
-                           ctx->done = true;
-                       },
-                       &primary_ctx);
+    spdk_blob_io_write(
+            superblock_blob_, channel, write_buf, kSuperblockPrimaryOffset / io_unit_size,
+            length_units,
+            [](void* arg, int bserrno) {
+                auto* ctx = static_cast<WriteCtx*>(arg);
+                ctx->status = bserrno;
+                ctx->done = true;
+            },
+            &primary_ctx);
 
     while (!primary_ctx.done) {
         env.Poll();
@@ -1526,7 +1613,9 @@ KvError Engine::WriteSuperblock() {
 }
 
 void Engine::UpdateSuperblockFileMapping(FileInfo* file) {
-    if (!file) return;
+    if (!file) {
+        return;
+    }
 
     // Find existing mapping or add new one
     for (uint16_t i = 0; i < superblock_.file_count; i++) {
@@ -1594,7 +1683,9 @@ int spdk_kv_open(const char* path, struct spdk_kv_open_opts* opts, spdk_kv_handl
 }
 
 int spdk_kv_close(spdk_kv_handle handle) {
-    if (!handle) return -1;
+    if (!handle) {
+        return -1;
+    }
     auto* engine = static_cast<Engine*>(handle);
     KvError err = engine->Close();
     delete engine;
@@ -1602,20 +1693,26 @@ int spdk_kv_close(spdk_kv_handle handle) {
 }
 
 int spdk_kv_put(spdk_kv_handle handle, uint64_t key, const void* value, uint32_t value_len) {
-    if (!handle) return -1;
+    if (!handle) {
+        return -1;
+    }
     auto* engine = static_cast<Engine*>(handle);
     return static_cast<int>(engine->Put(key, value, value_len));
 }
 
 int spdk_kv_get(spdk_kv_handle handle, uint64_t key, void* value_buf, uint32_t buf_len,
                 uint32_t* actual_len) {
-    if (!handle) return -1;
+    if (!handle) {
+        return -1;
+    }
     auto* engine = static_cast<Engine*>(handle);
     return static_cast<int>(engine->Get(key, value_buf, buf_len, actual_len));
 }
 
 int spdk_kv_del(spdk_kv_handle handle, uint64_t key) {
-    if (!handle) return -1;
+    if (!handle) {
+        return -1;
+    }
     auto* engine = static_cast<Engine*>(handle);
     return static_cast<int>(engine->Delete(key));
 }
@@ -1623,7 +1720,9 @@ int spdk_kv_del(spdk_kv_handle handle, uint64_t key) {
 void spdk_kv_put_async(spdk_kv_handle handle, uint64_t key, const void* value, uint32_t value_len,
                        spdk_kv_cb cb, void* cb_arg) {
     if (!handle) {
-        if (cb) cb(cb_arg, -1);
+        if (cb) {
+            cb(cb_arg, -1);
+        }
         return;
     }
     auto* engine = static_cast<Engine*>(handle);
@@ -1633,7 +1732,9 @@ void spdk_kv_put_async(spdk_kv_handle handle, uint64_t key, const void* value, u
 void spdk_kv_get_async(spdk_kv_handle handle, uint64_t key, void* value_buf, uint32_t buf_len,
                        spdk_kv_get_cb cb, void* cb_arg) {
     if (!handle) {
-        if (cb) cb(cb_arg, -1, 0);
+        if (cb) {
+            cb(cb_arg, -1, 0);
+        }
         return;
     }
     auto* engine = static_cast<Engine*>(handle);
@@ -1642,7 +1743,9 @@ void spdk_kv_get_async(spdk_kv_handle handle, uint64_t key, void* value_buf, uin
 
 void spdk_kv_del_async(spdk_kv_handle handle, uint64_t key, spdk_kv_cb cb, void* cb_arg) {
     if (!handle) {
-        if (cb) cb(cb_arg, -1);
+        if (cb) {
+            cb(cb_arg, -1);
+        }
         return;
     }
     auto* engine = static_cast<Engine*>(handle);
@@ -1650,19 +1753,25 @@ void spdk_kv_del_async(spdk_kv_handle handle, uint64_t key, spdk_kv_cb cb, void*
 }
 
 void spdk_kv_poll(spdk_kv_handle handle) {
-    if (!handle) return;
+    if (!handle) {
+        return;
+    }
     auto* engine = static_cast<Engine*>(handle);
     engine->Poll();
 }
 
 uint64_t spdk_kv_get_entry_count(spdk_kv_handle handle) {
-    if (!handle) return 0;
+    if (!handle) {
+        return 0;
+    }
     auto* engine = static_cast<Engine*>(handle);
     return engine->GetEntryCount();
 }
 
 uint64_t spdk_kv_get_total_bytes(spdk_kv_handle handle) {
-    if (!handle) return 0;
+    if (!handle) {
+        return 0;
+    }
     auto* engine = static_cast<Engine*>(handle);
     return engine->GetTotalDataBytes();
 }

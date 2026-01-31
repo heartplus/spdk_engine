@@ -18,7 +18,9 @@ SparseBitmap::SparseBitmap(size_t total_bits)
         : total_bits_(total_bits), chunk_count_((total_bits + kChunkBits - 1) / kChunkBits) {}
 
 void SparseBitmap::Set(size_t idx) {
-    if (idx >= total_bits_) return;
+    if (idx >= total_bits_) {
+        return;
+    }
 
     size_t chunk_idx = idx / kChunkBits;
     size_t bit_idx = idx % kChunkBits;
@@ -31,7 +33,9 @@ void SparseBitmap::Set(size_t idx) {
 }
 
 void SparseBitmap::Clear(size_t idx) {
-    if (idx >= total_bits_) return;
+    if (idx >= total_bits_) {
+        return;
+    }
 
     size_t chunk_idx = idx / kChunkBits;
     size_t bit_idx = idx % kChunkBits;
@@ -47,7 +51,9 @@ void SparseBitmap::Clear(size_t idx) {
 }
 
 bool SparseBitmap::Test(size_t idx) const {
-    if (idx >= total_bits_) return false;
+    if (idx >= total_bits_) {
+        return false;
+    }
 
     size_t chunk_idx = idx / kChunkBits;
     auto it = chunks_.find(chunk_idx);
@@ -97,8 +103,12 @@ void FileMetadata::MarkInvalid(uint32_t offset_index, uint16_t page_count, uint3
             valid_bitmap->Clear(offset_index + i);
         }
     }
-    if (valid_entries > 0) valid_entries--;
-    if (valid_bytes >= bytes) valid_bytes -= bytes;
+    if (valid_entries > 0) {
+        valid_entries--;
+    }
+    if (valid_bytes >= bytes) {
+        valid_bytes -= bytes;
+    }
 }
 
 bool FileMetadata::IsPageValid(uint32_t offset_index) const {
@@ -127,7 +137,9 @@ void RateLimiter::SetRate(uint32_t iops) {
 }
 
 bool RateLimiter::Allow() {
-    if (max_iops_ == 0) return true;
+    if (max_iops_ == 0) {
+        return true;
+    }
 
     auto now = std::chrono::steady_clock::now();
     uint64_t now_ns =
@@ -181,7 +193,9 @@ CompactionTask::CompactionTask(FileMetadata* src_file, MemIndex* mem_index)
 CompactionTask::~CompactionTask() {}
 
 void CompactionTask::Step() {
-    if (io_pending_) return;
+    if (io_pending_) {
+        return;
+    }
 
     switch (state_) {
         case State::kInit:
@@ -265,7 +279,9 @@ void CompactionTask::MarkCompacting() {
 }
 
 void CompactionTask::SkipInvalidPages() {
-    if (!src_file_->valid_bitmap) return;
+    if (!src_file_->valid_bitmap) {
+        return;
+    }
 
     // Skip pages that are marked invalid
     while (current_offset_ < src_size_) {
@@ -303,10 +319,14 @@ void CompactionTask::ReadNextChunk() {
 }
 
 bool CompactionTask::ValidateEntry(const void* entry_data, size_t max_size) {
-    if (max_size < sizeof(EntryHeader)) return false;
+    if (max_size < sizeof(EntryHeader)) {
+        return false;
+    }
 
     const auto* header = static_cast<const EntryHeader*>(entry_data);
-    if (header->magic != kEntryMagic) return false;
+    if (header->magic != kEntryMagic) {
+        return false;
+    }
 
     // Get value length
     const char* ptr = static_cast<const char*>(entry_data);
@@ -318,7 +338,9 @@ bool CompactionTask::ValidateEntry(const void* entry_data, size_t max_size) {
                                         value_len + sizeof(uint32_t),
                                 kPageSize);
 
-    if (entry_size > max_size) return false;
+    if (entry_size > max_size) {
+        return false;
+    }
 
     // Validate checksum
     uint32_t stored_checksum =
@@ -573,7 +595,9 @@ void CompactionScheduler::Poll() {
 std::vector<FileMetadata*> CompactionScheduler::SelectFilesForCompaction(double min_garbage_ratio) {
     std::vector<FileMetadata*> candidates;
 
-    if (!file_metadata_) return candidates;
+    if (!file_metadata_) {
+        return candidates;
+    }
 
     for (auto& pair : *file_metadata_) {
         FileMetadata* file = &pair.second;

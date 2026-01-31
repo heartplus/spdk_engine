@@ -21,8 +21,6 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
-# Option for SPDK integration (enabled by default)
-
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
@@ -51,49 +49,45 @@ target_include_directories(spdk_kv_shared PUBLIC
 )
 set_target_properties(spdk_kv_shared PROPERTIES OUTPUT_NAME spdk_kv)
 
-# SPDK integration (optional)
-if(WITH_SPDK)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(SPDK REQUIRED spdk_bdev spdk_env_dpdk)
+# SPDK integration
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SPDK REQUIRED spdk_bdev spdk_env_dpdk)
 
-    # Find additional SPDK dependencies
-    find_package(OpenSSL REQUIRED)
-    pkg_check_modules(UUID REQUIRED uuid)
-    find_library(ISAL_LIB isal HINTS /usr/local/lib)
-    find_library(ISAL_CRYPTO_LIB isal_crypto HINTS /usr/local/lib)
+# Find additional SPDK dependencies
+find_package(OpenSSL REQUIRED)
+pkg_check_modules(UUID REQUIRED uuid)
+find_library(ISAL_LIB isal HINTS /usr/local/lib)
+find_library(ISAL_CRYPTO_LIB isal_crypto HINTS /usr/local/lib)
 
-    # Static library
-    target_compile_definitions(spdk_kv PUBLIC WITH_SPDK)
-    target_include_directories(spdk_kv PUBLIC ${SPDK_INCLUDE_DIRS})
-    target_link_libraries(spdk_kv PUBLIC
-        ${SPDK_LIBRARIES}
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        ${UUID_LIBRARIES}
-        ${ISAL_LIB}
-        ${ISAL_CRYPTO_LIB}
-        numa
-        pthread
-        dl
-        rt
-    )
+# Static library
+target_include_directories(spdk_kv PUBLIC ${SPDK_INCLUDE_DIRS})
+target_link_libraries(spdk_kv PUBLIC
+    ${SPDK_LIBRARIES}
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ${UUID_LIBRARIES}
+    ${ISAL_LIB}
+    ${ISAL_CRYPTO_LIB}
+    numa
+    pthread
+    dl
+    rt
+)
 
-    # Shared library
-    target_compile_definitions(spdk_kv_shared PUBLIC WITH_SPDK)
-    target_include_directories(spdk_kv_shared PUBLIC ${SPDK_INCLUDE_DIRS})
-    target_link_libraries(spdk_kv_shared PUBLIC
-        ${SPDK_LIBRARIES}
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        ${UUID_LIBRARIES}
-        ${ISAL_LIB}
-        ${ISAL_CRYPTO_LIB}
-        numa
-        pthread
-        dl
-        rt
-    )
-endif()
+# Shared library
+target_include_directories(spdk_kv_shared PUBLIC ${SPDK_INCLUDE_DIRS})
+target_link_libraries(spdk_kv_shared PUBLIC
+    ${SPDK_LIBRARIES}
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ${UUID_LIBRARIES}
+    ${ISAL_LIB}
+    ${ISAL_CRYPTO_LIB}
+    numa
+    pthread
+    dl
+    rt
+)
 
 # Examples
 add_subdirectory(examples)
@@ -124,5 +118,5 @@ message(STATUS "SPDK KV Engine Configuration:")
 message(STATUS "  Version:     ${PROJECT_VERSION}")
 message(STATUS "  Build type:  ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "  SPDK:        ${WITH_SPDK}")
+message(STATUS "  SPDK:        ON")
 message(STATUS "")

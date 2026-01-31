@@ -33,6 +33,7 @@ bool IoSubmitter::Initialize(spdk_nvme_ctrlr* ctrlr, spdk_nvme_ns* ns, spdk_blob
     // Create IO queue pair
     struct spdk_nvme_io_qpair_opts opts;
     spdk_nvme_ctrlr_get_default_io_qpair_opts(ctrlr, &opts, sizeof(opts));
+    // TODO: 改成 配置加载此参数
     opts.io_queue_size = 256;  // Can be tuned
 
     qpair_ = spdk_nvme_ctrlr_alloc_io_qpair(ctrlr, &opts, sizeof(opts));

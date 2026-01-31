@@ -62,6 +62,7 @@ bool SpdkEnv::Initialize(const SpdkEnvOpts& opts) {
     }
 
     // Open bdev
+    // TODO: 检查参数，要求 bdev_name 非空
     if (!opts.bdev_name.empty()) {
         bdev_ = spdk_bdev_get_by_name(opts.bdev_name.c_str());
         if (!bdev_) {
@@ -369,7 +370,9 @@ void* DmaAllocator::Alloc(size_t size, size_t alignment) {
 }
 
 void DmaAllocator::Free(void* ptr) {
-    if (!ptr) return;
+    if (!ptr) {
+        return;
+    }
     spdk_dma_free(ptr);
 }
 

@@ -144,7 +144,9 @@ void IndexLoader::LoadAsMemoryDump(int area) {
 }
 
 void IndexLoader::RebuildPslArray() {
-    if (!mem_index_) return;
+    if (!mem_index_) {
+        return;
+    }
     mem_index_->RebuildPslArray();
 }
 

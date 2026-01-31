@@ -69,7 +69,9 @@ public:
 
     // Find entry by key
     MemIndexEntry* Find(uint64_t key) {
-        if (!entries_ || !psl_) return nullptr;
+        if (!entries_ || !psl_) {
+            return nullptr;
+        }
 
         uint64_t hash;
         uint8_t tag;
@@ -110,7 +112,9 @@ public:
 
     // Insert or update entry (Robin Hood Hashing)
     bool Upsert(uint64_t key, const MemIndexEntry& new_entry) {
-        if (!entries_ || !psl_) return false;
+        if (!entries_ || !psl_) {
+            return false;
+        }
 
         uint64_t hash;
         uint8_t tag;
