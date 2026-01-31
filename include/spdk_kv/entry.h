@@ -162,6 +162,75 @@ struct PendingWrite {
     bool is_compaction() const { return (flags & 0x01) != 0; }
 };
 
+// AppendSlot: protocol-layer abstraction for RDMA two-phase commit
+struct AppendSlot {
+    void* addr;        // Points to address inside AppendBuffer
+    uint32_t len;      // Total reserved length (aligned)
+    uint32_t epoch;    // Buffer epoch (detects buffer reuse)
+    uint32_t slot_id;  // Unique slot identifier
+
+    enum class State : uint8_t {
+        ALLOCATED,      // Allocated, waiting for RDMA WRITE
+        RDMA_COMPLETE,  // RDMA WRITE complete, waiting for COMMIT
+        COMMITTED,      // Committed, waiting for flush
+        FLUSHED         // Flushed to disk
+    };
+    State state;
+};
+
+// RdmaSlot: RDMA protocol wrapper returned to client
+struct RdmaSlot {
+    void* buffer;           // Slot start address (= AppendSlot.addr)
+    uint32_t value_offset;  // Offset where value data should be written (= header_size)
+    uint32_t max_value_len; // Maximum writable value length
+    uint64_t rkey;          // RDMA remote key
+    uint32_t slot_id;       // Slot ID for subsequent COMMIT call
+    uint32_t epoch;         // Buffer epoch (for validation)
+};
+
+// BufferedPendingWrite: per-entry tracking within an AppendBuffer IO
+struct BufferedPendingWrite {
+    uint64_t key;
+    uint32_t sequence;
+    uint32_t buffer_offset;
+    uint32_t aligned_size;
+    uint16_t page_count;
+    uint8_t tag;
+    uint8_t flags;
+    KvCallback callback;
+    void* cb_arg;
+    uint16_t old_file_id;
+    uint32_t old_offset_index;
+    uint64_t old_garbage_size;
+};
+
+// WaitQueueEntry: backpressure deferred writes
+struct WaitQueueEntry {
+    uint64_t key;
+    void* dma_buffer;      // Copied at enqueue time
+    uint32_t value_len;
+    uint32_t aligned_size;
+    uint32_t sequence;
+    uint16_t page_count;
+    uint8_t tag;
+    KvCallback callback;
+    void* cb_arg;
+    bool is_delete;
+    uint64_t old_garbage_size;
+};
+
+// Forward declaration
+class Engine;
+class AppendBuffer;
+
+// BufferIoContext: completion context for buffer IO
+struct BufferIoContext {
+    Engine* engine;
+    AppendBuffer* buffer;
+    uint16_t file_id;
+    uint32_t base_page_offset;
+};
+
 // Serialized MemIndex header
 struct SerializedMemIndexHeader {
     uint32_t magic;            // 0x4D494458 ("MIDX")

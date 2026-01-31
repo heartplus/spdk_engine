@@ -184,7 +184,13 @@ private:
 // Append buffer manager
 class AppendBufferManager {
 public:
-    AppendBufferManager() : active_buffer_(nullptr), backpressure_active_(false) {}
+    using BackpressureCallback = void (*)(void* arg);
+
+    AppendBufferManager()
+            : active_buffer_(nullptr),
+              backpressure_active_(false),
+              current_buffer_count_(0),
+              was_backpressure_active_(false) {}
 
     ~AppendBufferManager() {
         // Clean up allocated buffers
@@ -206,6 +212,8 @@ public:
             all_buffers_.push_back(buf);
             complete_ring_.Enqueue(buf);
         }
+
+        current_buffer_count_ = buffer_count;
 
         // Get active buffer
         complete_ring_.Dequeue(&active_buffer_);
@@ -284,6 +292,29 @@ public:
         }
     }
 
+    // Dynamically expand buffer count
+    bool TryExpand() {
+        if (current_buffer_count_ >= kMaxBufferCount) {
+            return false;
+        }
+
+        void* mem = std::aligned_alloc(kPageSize, buffer_size_);
+        if (!mem) {
+            return false;
+        }
+
+        auto* buf = new AppendBuffer(mem, buffer_size_);
+        all_buffers_.push_back(buf);
+        complete_ring_.Enqueue(buf);
+        current_buffer_count_++;
+
+        if (active_buffer_ == nullptr) {
+            complete_ring_.Dequeue(&active_buffer_);
+        }
+
+        return true;
+    }
+
     // Backpressure management
     bool CheckBackpressure() {
         size_t pending = PendingCount();
@@ -294,7 +325,9 @@ public:
             }
         } else {
             if (pending >= kBackpressureHighWater) {
-                backpressure_active_ = true;
+                if (!TryExpand()) {
+                    backpressure_active_ = true;
+                }
             }
         }
         return backpressure_active_;
@@ -308,6 +341,48 @@ public:
 
     size_t CurrentEntryCount() const { return active_buffer_ ? active_buffer_->EntryCount() : 0; }
 
+    // Register a callback to be invoked when backpressure is relieved
+    void RegisterResumeCallback(BackpressureCallback cb, void* arg) {
+        resume_callbacks_.Enqueue({cb, arg});
+    }
+
+    // Check and fire resume notifications on backpressure transition
+    void ProcessResumeNotifications() {
+        if (!was_backpressure_active_ && !backpressure_active_) {
+            return;
+        }
+
+        if (was_backpressure_active_ && !backpressure_active_) {
+            ResumeNotification notification;
+            while (resume_callbacks_.Dequeue(&notification)) {
+                notification.callback(notification.arg);
+            }
+        }
+
+        was_backpressure_active_ = backpressure_active_;
+    }
+
+    // RDMA flow control adapter
+    class RdmaFlowController {
+    public:
+        explicit RdmaFlowController(AppendBufferManager* mgr) : buffer_mgr_(mgr) {}
+
+        bool CanAcceptRequest() { return !buffer_mgr_->IsBackpressureActive(); }
+
+        bool TryProcessOrDefer(void* rdma_ctx, BackpressureCallback on_resume) {
+            if (CanAcceptRequest()) {
+                return true;
+            }
+            buffer_mgr_->RegisterResumeCallback(on_resume, rdma_ctx);
+            return false;
+        }
+
+    private:
+        AppendBufferManager* buffer_mgr_;
+    };
+
+    RdmaFlowController* CreateFlowController() { return new RdmaFlowController(this); }
+
 private:
     void* Reserve(size_t len) {
         if (active_buffer_ == nullptr || active_buffer_->Used() + len > kFlushThreshold) {
@@ -316,11 +391,19 @@ private:
         return active_buffer_->Reserve(len);
     }
 
+    struct ResumeNotification {
+        BackpressureCallback callback;
+        void* arg;
+    };
+
     size_t buffer_size_ = kAppendBufferSize;
     SimpleRing<AppendBuffer*, kMaxBufferCount + 1> submit_ring_;
     SimpleRing<AppendBuffer*, kMaxBufferCount + 1> complete_ring_;
     AppendBuffer* active_buffer_;
     bool backpressure_active_;
+    size_t current_buffer_count_;
+    bool was_backpressure_active_;
+    SimpleRing<ResumeNotification, 256> resume_callbacks_;
     std::queue<AppendBuffer*> pending_reset_queue_;
     std::vector<AppendBuffer*> all_buffers_;  // For cleanup
 };

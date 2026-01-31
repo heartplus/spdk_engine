@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -139,6 +140,21 @@ public:
     // Get file metadata (for compaction)
     FileMetadata* GetFileMetadata(uint16_t file_id);
 
+    // RDMA two-phase commit interface
+    void BuildEntryInplaceRdma(void* slot, uint64_t key, uint32_t len, uint32_t seq,
+                               bool is_tombstone = false);
+    int AllocRdmaSlot(uint32_t value_len, RdmaSlot* out_slot);
+    int CommitRdmaSlot(uint32_t slot_id, uint32_t epoch);
+    void PutRdma(uint64_t key, void* dma_buffer, uint32_t value_offset, uint32_t len, uint32_t seq,
+                 KvCallback cb, void* cb_arg);
+
+    // Vectored put (placeholder, delegates to PutAsync)
+    void PutVectored(uint64_t key, void* value, uint32_t len, KvCallback cb, void* cb_arg);
+
+    // AppendBuffer-based IO merge path
+    void PutBuffered(uint64_t key, const void* value, uint32_t value_len, KvCallback cb,
+                     void* cb_arg);
+
 private:
     // Internal helpers
     KvError InitializeNew(const CreateOpts& opts);
@@ -218,6 +234,18 @@ private:
     void ProcessPendingWriteQueue();
     void SubmitQueuedWrite(PendingWriteRequest& req, FileInfo* file);
 
+    // RDMA slot management
+    uint32_t AllocateSlotId();
+    uint64_t GetBufferRkey(void* buffer_addr);
+
+    // Backpressure resume and wait queue
+    static void OnBackpressureResume(void* arg);
+    void ProcessWaitQueue();
+
+    // Buffer IO submission and completion
+    void SubmitBufferIo(AppendBuffer* buffer);
+    void OnBufferIoComplete(int status, BufferIoContext* ctx);
+
     // State
     EngineState state_;
     std::string path_;
@@ -268,6 +296,20 @@ private:
     // Superblock blob
     spdk_blob* superblock_blob_;
     spdk_blob_id superblock_blob_id_;
+
+    // RDMA slot tracking
+    std::unordered_map<uint32_t, AppendSlot> append_slots_;
+    uint32_t next_global_slot_id_;
+
+    // Flush trigger for IO batching
+    FlushTrigger flush_trigger_;
+    uint64_t last_flush_ns_;
+
+    // Backpressure wait queue
+    std::queue<WaitQueueEntry> wait_queue_;
+
+    // Per-buffer pending write tracking for IO merge
+    std::unordered_map<AppendBuffer*, std::vector<BufferedPendingWrite>> buffer_pending_writes_;
 };
 
 // C-style API wrapper (for compatibility)

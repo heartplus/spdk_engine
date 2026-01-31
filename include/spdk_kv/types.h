@@ -85,6 +85,12 @@ enum class FileState : uint8_t {
 // IO state
 enum class IoState : uint8_t { kPending = 0, kBuffered, kWritingData, kCompleted, kFailed };
 
+// Write mode
+enum class PutMode : uint8_t {
+    LOCAL,      // Local Put, value is a local memory pointer
+    RDMA_WRITE  // RDMA Write, value already in DMA Buffer
+};
+
 // Entry flags
 constexpr uint8_t kFlagDeleted = 0x01;     // Tombstone marker
 constexpr uint8_t kFlagCompaction = 0x02;  // Entry created by compaction
