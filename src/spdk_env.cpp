@@ -61,55 +61,57 @@ bool SpdkEnv::Initialize(const SpdkEnvOpts& opts) {
         return false;
     }
 
-    // Open bdev
-    // TODO: 检查参数，要求 bdev_name 非空
-    if (!opts.bdev_name.empty()) {
-        bdev_ = spdk_bdev_get_by_name(opts.bdev_name.c_str());
-        if (!bdev_) {
-            spdk_env_fini();
-            return false;
-        }
-
-        int rc = spdk_bdev_open_ext(opts.bdev_name.c_str(), true, nullptr, nullptr, &bdev_desc_);
-        if (rc < 0) {
-            spdk_env_fini();
-            return false;
-        }
-
-        // Create blob store device from bdev
-        struct spdk_bs_dev* bs_dev = nullptr;
-        rc = spdk_bdev_create_bs_dev_ext(opts.bdev_name.c_str(), nullptr, nullptr, &bs_dev);
-        if (rc < 0 || !bs_dev) {
-            spdk_bdev_close(bdev_desc_);
-            spdk_env_fini();
-            return false;
-        }
-
-        // Load blob store
-        // This is done asynchronously, we use a synchronization mechanism here
-        struct BsLoadCtx {
-            spdk_blob_store* bs;
-            int rc;
-            bool done;
-        };
-        BsLoadCtx load_ctx = {nullptr, 0, false};
-
-        spdk_bs_load(bs_dev, nullptr, OnBlobStoreLoadComplete, &load_ctx);
-
-        // Wait for completion (in real usage, this would be in the event loop)
-        while (!load_ctx.done) {
-            // Process events
-        }
-
-        if (load_ctx.rc != 0 || !load_ctx.bs) {
-            spdk_bdev_close(bdev_desc_);
-            spdk_env_fini();
-            return false;
-        }
-
-        blobstore_ = load_ctx.bs;
-        io_channel_ = spdk_bs_alloc_io_channel(blobstore_);
+    // Open bdev - bdev_name is required
+    if (opts.bdev_name.empty()) {
+        spdk_env_fini();
+        return false;
     }
+
+    bdev_ = spdk_bdev_get_by_name(opts.bdev_name.c_str());
+    if (!bdev_) {
+        spdk_env_fini();
+        return false;
+    }
+
+    int rc = spdk_bdev_open_ext(opts.bdev_name.c_str(), true, nullptr, nullptr, &bdev_desc_);
+    if (rc < 0) {
+        spdk_env_fini();
+        return false;
+    }
+
+    // Create blob store device from bdev
+    struct spdk_bs_dev* bs_dev = nullptr;
+    rc = spdk_bdev_create_bs_dev_ext(opts.bdev_name.c_str(), nullptr, nullptr, &bs_dev);
+    if (rc < 0 || !bs_dev) {
+        spdk_bdev_close(bdev_desc_);
+        spdk_env_fini();
+        return false;
+    }
+
+    // Load blob store
+    // This is done asynchronously, we use a synchronization mechanism here
+    struct BsLoadCtx {
+        spdk_blob_store* bs;
+        int rc;
+        bool done;
+    };
+    BsLoadCtx load_ctx = {nullptr, 0, false};
+
+    spdk_bs_load(bs_dev, nullptr, OnBlobStoreLoadComplete, &load_ctx);
+
+    // Wait for completion (in real usage, this would be in the event loop)
+    while (!load_ctx.done) {
+        // Process events
+    }
+
+    if (load_ctx.rc != 0 || !load_ctx.bs) {
+        spdk_bdev_close(bdev_desc_);
+        spdk_env_fini();
+        return false;
+    }
+
+    blobstore_ = load_ctx.bs;
+    io_channel_ = spdk_bs_alloc_io_channel(blobstore_);
 
     initialized_ = true;
     return true;

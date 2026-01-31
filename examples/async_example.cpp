@@ -219,6 +219,52 @@ struct WorkerConfig {
     int del_ratio;  // percentage (0-100)
 };
 
+// Find a valid key for read/delete (search backwards from current position)
+uint64_t FindValidKey(const std::vector<bool>& key_written, int ops_submitted) {
+    for (int j = ops_submitted; j > 0; j--) {
+        if (key_written[j]) {
+            return static_cast<uint64_t>(j);
+        }
+    }
+    return 0;
+}
+
+// Create a put task
+void MakePutTask(Task& task, int ops_submitted, std::vector<bool>& key_written) {
+    task.type = TaskType::kPut;
+    task.key = ops_submitted + 1;
+    std::string val = "value_" + std::to_string(task.key) + "_data_padding_for_test";
+    task.value.assign(val.begin(), val.end());
+    task.value_len = static_cast<uint32_t>(val.size());
+    task.read_buf = nullptr;
+    key_written[task.key] = true;
+}
+
+// Create a get task, returns false if fallback to put is needed
+bool MakeGetTask(Task& task, int ops_submitted, std::vector<bool>& key_written,
+                 std::vector<char>* free_buf) {
+    uint64_t get_key = FindValidKey(key_written, ops_submitted);
+    if (get_key > 0 && free_buf) {
+        task.type = TaskType::kGet;
+        task.key = get_key;
+        task.read_buf = free_buf;
+        return true;
+    }
+    return false;
+}
+
+// Create a delete task, returns false if fallback to put is needed
+bool MakeDeleteTask(Task& task, int ops_submitted, std::vector<bool>& key_written) {
+    uint64_t del_key = FindValidKey(key_written, ops_submitted);
+    if (del_key > 0) {
+        task.type = TaskType::kDelete;
+        task.key = del_key;
+        key_written[del_key] = false;
+        return true;
+    }
+    return false;
+}
+
 void WorkerThreadLoop(const WorkerConfig& config) {
     std::cout << "[Worker] Started (total_ops=" << config.total_ops
               << ", max_inflight=" << config.max_inflight << ")" << std::endl;
@@ -270,25 +316,28 @@ void WorkerThreadLoop(const WorkerConfig& config) {
 
             switch (result.type) {
                 case TaskType::kPut:
-                    if (result.status == 0)
+                    if (result.status == 0) {
                         put_success++;
-                    else
+                    } else {
                         put_fail++;
+                    }
                     break;
 
                 case TaskType::kGet:
-                    if (result.status == 0)
+                    if (result.status == 0) {
                         get_success++;
-                    else
+                    } else {
                         get_fail++;
+                    }
                     // Release buffer (simplified - in real code track which buffer was used)
                     break;
 
                 case TaskType::kDelete:
-                    if (result.status == 0)
+                    if (result.status == 0) {
                         del_success++;
-                    else
+                    } else {
                         del_fail++;
+                    }
                     break;
 
                 default:
@@ -304,74 +353,15 @@ void WorkerThreadLoop(const WorkerConfig& config) {
             // Determine operation type based on ratios
             int type_rand = ops_submitted % 100;
 
-            // Find a valid key for read/delete (search backwards from current position)
-            auto find_valid_key = [&]() -> uint64_t {
-                for (int j = ops_submitted; j > 0; j--) {
-                    if (key_written[j]) {
-                        return static_cast<uint64_t>(j);
-                    }
-                }
-                return 0;
-            };
-
             if (type_rand < config.put_ratio) {
-                // Put operation
-                task.type = TaskType::kPut;
-                task.key = ops_submitted + 1;
-                std::string val = "value_" + std::to_string(task.key) + "_data_padding_for_test";
-                task.value.assign(val.begin(), val.end());
-                task.value_len = static_cast<uint32_t>(val.size());
-                task.read_buf = nullptr;
-                key_written[task.key] = true;
-
+                MakePutTask(task, ops_submitted, key_written);
             } else if (type_rand < config.put_ratio + config.get_ratio) {
-                // Get operation - only get keys that have been written
-                uint64_t get_key = find_valid_key();
-                if (get_key > 0) {
-                    task.read_buf = get_free_buffer();
-                    if (task.read_buf) {
-                        task.type = TaskType::kGet;
-                        task.key = get_key;
-                    } else {
-                        // No buffer available, convert to put
-                        task.type = TaskType::kPut;
-                        task.key = ops_submitted + 1;
-                        std::string val =
-                                "value_" + std::to_string(task.key) + "_data_padding_for_test";
-                        task.value.assign(val.begin(), val.end());
-                        task.value_len = static_cast<uint32_t>(val.size());
-                        task.read_buf = nullptr;
-                        key_written[task.key] = true;
-                    }
-                } else {
-                    // No valid key to read, fall back to put
-                    task.type = TaskType::kPut;
-                    task.key = ops_submitted + 1;
-                    std::string val =
-                            "value_" + std::to_string(task.key) + "_data_padding_for_test";
-                    task.value.assign(val.begin(), val.end());
-                    task.value_len = static_cast<uint32_t>(val.size());
-                    task.read_buf = nullptr;
-                    key_written[task.key] = true;
+                if (!MakeGetTask(task, ops_submitted, key_written, get_free_buffer())) {
+                    MakePutTask(task, ops_submitted, key_written);
                 }
-
             } else {
-                // Delete operation - only delete written keys
-                uint64_t del_key = find_valid_key();
-                if (del_key > 0) {
-                    task.type = TaskType::kDelete;
-                    task.key = del_key;
-                    key_written[del_key] = false;
-                } else {
-                    // No valid key to delete, fall back to put
-                    task.type = TaskType::kPut;
-                    task.key = ops_submitted + 1;
-                    std::string val =
-                            "value_" + std::to_string(task.key) + "_data_padding_for_test";
-                    task.value.assign(val.begin(), val.end());
-                    task.value_len = static_cast<uint32_t>(val.size());
-                    task.read_buf = nullptr;
-                    key_written[task.key] = true;
+                if (!MakeDeleteTask(task, ops_submitted, key_written)) {
+                    MakePutTask(task, ops_submitted, key_written);
                 }
             }
 
@@ -424,7 +414,6 @@ void PrintUsage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]" << std::endl;
     std::cout << "Options:" << std::endl;
     std::cout << "  --bdev <name>      SPDK bdev name (e.g., Malloc0, Nvme0n1)" << std::endl;
-    std::cout << "  --simulation       Force simulation mode (default if no bdev)" << std::endl;
     std::cout << "  --num-ops <n>      Total number of operations (default: 10000)" << std::endl;
     std::cout << "  --max-inflight <n> Max in-flight operations (default: 64)" << std::endl;
     std::cout << "  --put-ratio <n>    Put operation ratio % (default: 70)" << std::endl;
@@ -438,7 +427,6 @@ void PrintUsage(const char* prog) {
 // =============================================================================
 int main(int argc, char** argv) {
     std::string bdev_name;
-    [[maybe_unused]] bool force_simulation = false;
 
     WorkerConfig config;
     config.total_ops = 10000;
@@ -452,8 +440,6 @@ int main(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--bdev" && i + 1 < argc) {
             bdev_name = argv[++i];
-        } else if (arg == "--simulation") {
-            force_simulation = true;
         } else if (arg == "--num-ops" && i + 1 < argc) {
             config.total_ops = std::stoi(argv[++i]);
         } else if (arg == "--max-inflight" && i + 1 < argc) {

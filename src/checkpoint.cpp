@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "spdk_kv/crc32.h"
+#include "spdk_kv/spdk_env.h"
 
 namespace spdk_kv {
 
@@ -18,12 +19,16 @@ IncrementalCheckpoint::IncrementalCheckpoint(MemIndex* mem_index, uint64_t capac
           global_sequence_(0),
           checkpoint_start_sequence_(0),
           active_buffer_count_(0),
-          current_segment_idx_(0) {
+          current_segment_idx_(0),
+          mem_index_blob_(nullptr),
+          io_channel_(nullptr),
+          blobstore_(nullptr),
+          io_pending_(false) {
     std::memset(segment_versions_, 0, sizeof(segment_versions_));
     std::memset(active_buffer_positions_, 0, sizeof(active_buffer_positions_));
 
-    // Allocate segment buffer (1GB max, but we use smaller chunks for simulation)
-    segment_buffer_.resize(64 * 1024 * 1024);  // 64MB for simulation
+    // Allocate segment buffer (64MB for segment serialization)
+    segment_buffer_.resize(64 * 1024 * 1024);
 }
 
 IncrementalCheckpoint::~IncrementalCheckpoint() {}
@@ -80,17 +85,44 @@ void IncrementalCheckpoint::StartCheckpoint(CheckpointCallback callback) {
     ProcessNextSegment();
 }
 
+void IncrementalCheckpoint::SetSpdkResources(spdk_blob* mem_index_blob, spdk_io_channel* channel,
+                                              spdk_blob_store* blobstore) {
+    mem_index_blob_ = mem_index_blob;
+    io_channel_ = channel;
+    blobstore_ = blobstore;
+}
+
 bool IncrementalCheckpoint::Poll() {
-    // In simulation mode, checkpoint is synchronous
-    // In real SPDK mode, this would check IO completion
+    if (state_ == State::kIdle) {
+        return false;
+    }
+
+    // Poll SPDK for IO completions when IO is pending
+    if (io_pending_) {
+        SpdkEnv::Instance().Poll();
+    }
+
     return state_ != State::kIdle;
 }
 
 void IncrementalCheckpoint::ProcessNextSegment() {
     if (current_segment_idx_ >= pending_segments_.size()) {
-        // All segments written, sync data
+        // All segments written, sync blob metadata
         state_ = State::kSyncingData;
-        OnSyncComplete(0);  // Simulation: immediate completion
+
+        if (mem_index_blob_) {
+            io_pending_ = true;
+            spdk_blob_sync_md(
+                    mem_index_blob_,
+                    [](void* arg, int bserrno) {
+                        auto* ckpt = static_cast<IncrementalCheckpoint*>(arg);
+                        ckpt->io_pending_ = false;
+                        ckpt->OnSyncComplete(bserrno);
+                    },
+                    this);
+        } else {
+            OnSyncComplete(0);
+        }
         return;
     }
 
@@ -105,13 +137,41 @@ void IncrementalCheckpoint::ProcessNextSegment() {
         return;
     }
 
-    // In simulation mode, we don't actually write to disk
-    // In real SPDK mode, this would be:
-    // spdk_blob_io_write(mem_index_blob_, channel_, segment_buffer_.data(),
-    //                    seg_id * kMemIndexSegmentSize / kPageSize,
-    //                    data_size / kPageSize, on_segment_written, this);
+    if (mem_index_blob_ && io_channel_ && blobstore_) {
+        // Real SPDK mode: write segment data to blob via async IO
+        size_t aligned_size = AlignUp(data_size, kPageSize);
+        void* dma_buf = DmaAllocator::AllocZeroed(aligned_size, kPageSize);
+        if (!dma_buf) {
+            CompleteCheckpoint(-1);
+            return;
+        }
+        std::memcpy(dma_buf, segment_buffer_.data(), data_size);
 
-    OnSegmentWritten(0);  // Simulation: immediate completion
+        uint64_t io_unit_size = spdk_bs_get_io_unit_size(blobstore_);
+        uint64_t blob_offset = (static_cast<uint64_t>(seg_id) * kMemIndexSegmentSize) / io_unit_size;
+        uint64_t length_units = aligned_size / io_unit_size;
+
+        struct SegmentWriteCtx {
+            IncrementalCheckpoint* ckpt;
+            void* dma_buf;
+        };
+        auto* write_ctx = new SegmentWriteCtx{this, dma_buf};
+
+        io_pending_ = true;
+        spdk_blob_io_write(
+                mem_index_blob_, io_channel_, dma_buf, blob_offset, length_units,
+                [](void* arg, int bserrno) {
+                    auto* ctx = static_cast<SegmentWriteCtx*>(arg);
+                    ctx->ckpt->io_pending_ = false;
+                    DmaAllocator::Free(ctx->dma_buf);
+                    ctx->ckpt->OnSegmentWritten(bserrno);
+                    delete ctx;
+                },
+                write_ctx);
+    } else {
+        // Fallback: immediate completion (no SPDK resources available)
+        OnSegmentWritten(0);
+    }
 }
 
 void IncrementalCheckpoint::OnSegmentWritten(int status) {

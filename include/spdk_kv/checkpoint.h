@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <spdk/blob.h>
+
 #include <bitset>
 #include <cstdint>
 #include <functional>
@@ -117,6 +119,10 @@ public:
     const ActiveBufferPos* GetActiveBufferPositions() const { return active_buffer_positions_; }
     uint8_t GetActiveBufferCount() const { return active_buffer_count_; }
 
+    // Set SPDK resources for real IO
+    void SetSpdkResources(spdk_blob* mem_index_blob, spdk_io_channel* channel,
+                          spdk_blob_store* blobstore);
+
     // Serialize a segment to buffer
     // Returns bytes written, or 0 on error
     size_t SerializeSegment(uint32_t segment_id, void* buffer, size_t buffer_size);
@@ -163,8 +169,16 @@ private:
     // Callback
     CheckpointCallback callback_;
 
-    // Buffer for segment serialization (simulation mode)
+    // DMA buffer for segment serialization
     std::vector<char> segment_buffer_;
+
+    // SPDK resources for real IO
+    spdk_blob* mem_index_blob_;
+    spdk_io_channel* io_channel_;
+    spdk_blob_store* blobstore_;
+
+    // Pending IO state for async segment writes
+    bool io_pending_;
 };
 
 }  // namespace spdk_kv

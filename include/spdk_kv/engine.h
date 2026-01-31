@@ -33,6 +33,7 @@ struct EngineConfig {
     // IO config
     size_t append_buffer_size = kAppendBufferSize;  // 2MB
     size_t append_buffer_count = kMinBufferCount;   // 4
+    uint32_t io_queue_size = 256;                   // NVMe IO queue depth
 
     // Checkpoint config
     uint64_t checkpoint_interval_ns = 300ULL * 1000 * 1000 * 1000;     // 300s
@@ -175,9 +176,47 @@ private:
     void BuildEntryInplace(void* slot, uint64_t key, const void* value, uint32_t len, uint32_t seq,
                            bool is_tombstone = false);
 
+    // Async IO completion contexts and handlers
+    struct GetReadCompletionCtx {
+        Engine* engine;
+        void* dma_buffer;
+        void* value_buf;
+        uint32_t buf_len;
+        KvGetCallback cb;
+        void* cb_arg;
+    };
+    void HandleGetReadCompletion(int status, GetReadCompletionCtx* ctx);
+
+    struct OpenBlobForFileCtx {
+        Engine* engine;
+        FileInfo* file;
+        std::function<void(bool success)> callback;
+    };
+    void HandleBlobOpenedForFile(spdk_blob* blob, OpenBlobForFileCtx* ctx);
+
     // Index update
     void UpdateIndexOnWriteComplete(uint64_t key, const MemIndexEntry& entry, bool is_compaction,
                                     uint16_t old_file_id, uint32_t old_offset_index);
+
+    // Pending write request queued during async file allocation
+    struct PendingWriteRequest {
+        uint64_t key;
+        void* dma_buffer;
+        uint32_t aligned_size;
+        uint32_t sequence;
+        uint16_t page_count;
+        uint8_t tag;
+        KvCallback cb;
+        void* cb_arg;
+        bool is_delete;
+        uint64_t old_garbage_size;
+    };
+
+    // Async file allocation
+    void AllocateNewFileAsync();
+    void OnNewFileAllocated(bool success);
+    void ProcessPendingWriteQueue();
+    void SubmitQueuedWrite(PendingWriteRequest& req, FileInfo* file);
 
     // State
     EngineState state_;
@@ -218,6 +257,10 @@ private:
 
     // Pending async operations (for tracking in-flight requests)
     size_t pending_foreground_count_;
+
+    // Async file allocation state
+    bool allocating_new_file_;
+    std::vector<PendingWriteRequest> pending_write_queue_;
 
     // Pending blob operations count
     size_t pending_blob_ops_;

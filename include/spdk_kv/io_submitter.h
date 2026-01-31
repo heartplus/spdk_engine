@@ -69,7 +69,8 @@ public:
     IoSubmitter& operator=(const IoSubmitter&) = delete;
 
     // Initialize with SPDK resources
-    bool Initialize(spdk_nvme_ctrlr* ctrlr, spdk_nvme_ns* ns, spdk_blob_store* blobstore);
+    bool Initialize(spdk_nvme_ctrlr* ctrlr, spdk_nvme_ns* ns, spdk_blob_store* blobstore,
+                    uint32_t io_queue_size = 256);
 
     // Get IO channel
     spdk_io_channel* GetChannel() { return io_channel_; }
