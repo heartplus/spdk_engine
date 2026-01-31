@@ -3,11 +3,20 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <bitset>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+
+#ifdef __x86_64__
+#include <cpuid.h>
+#endif
+
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 #include "spdk_kv/entry.h"
 #include "spdk_kv/types.h"
@@ -30,6 +39,27 @@ public:
     static void ComputeHash(uint64_t key, uint64_t* hash, uint8_t* tag) {
         *hash = Hash(key);
         *tag = static_cast<uint8_t>((*hash >> 56) & 0xFF);
+    }
+};
+
+// Runtime SIMD capability detection
+class SIMDCapability {
+public:
+    static bool HasAvx2() {
+#ifdef __x86_64__
+        static bool checked = false;
+        static bool supported = false;
+        if (!checked) {
+            unsigned int eax, ebx, ecx, edx;
+            if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
+                supported = (ebx & (1 << 5)) != 0;  // AVX2 bit
+            }
+            checked = true;
+        }
+        return supported;
+#else
+        return false;
+#endif
     }
 };
 
@@ -78,37 +108,175 @@ public:
         HashUtil::ComputeHash(key, &hash, &tag);
 
         uint64_t idx = hash & (capacity_ - 1);
-        uint8_t dist = 0;
 
         // Prefetch hash bucket
         __builtin_prefetch(&entries_[idx], 0, 3);
 
+        return FindInternal(key, idx, tag);
+    }
+
+    // Batch find with prefetch pipeline
+    void BatchFind(const uint64_t* keys, size_t count, MemIndexEntry** results) {
+        if (!entries_ || !psl_ || !keys || !results) {
+            for (size_t i = 0; i < count; i++) {
+                results[i] = nullptr;
+            }
+            return;
+        }
+
+        static constexpr size_t kPrefetchDistance = 8;
+
+        // Pre-compute all hashes, indices, tags
+        // Use heap allocation for large counts, stack for small
+        constexpr size_t kStackLimit = 256;
+        uint64_t stack_indices[kStackLimit];
+        uint8_t stack_tags[kStackLimit];
+
+        uint64_t* indices = count <= kStackLimit
+                                    ? stack_indices
+                                    : new uint64_t[count];
+        uint8_t* tags = count <= kStackLimit
+                                ? stack_tags
+                                : new uint8_t[count];
+
+        for (size_t i = 0; i < count; i++) {
+            uint64_t hash;
+            HashUtil::ComputeHash(keys[i], &hash, &tags[i]);
+            indices[i] = hash & (capacity_ - 1);
+        }
+
+        // Prefetch first kPrefetchDistance entries
+        for (size_t i = 0; i < std::min(count, kPrefetchDistance); i++) {
+            __builtin_prefetch(&entries_[indices[i]], 0, 3);
+        }
+
+        // Pipeline: prefetch ahead, then find
+        for (size_t i = 0; i < count; i++) {
+            if (i + kPrefetchDistance < count) {
+                __builtin_prefetch(&entries_[indices[i + kPrefetchDistance]], 0, 3);
+            }
+
+            results[i] = FindInternal(keys[i], indices[i], tags[i]);
+        }
+
+        if (count > kStackLimit) {
+            delete[] indices;
+            delete[] tags;
+        }
+    }
+
+#ifdef __AVX2__
+    // AVX2 accelerated find (compares 4 entries at once via tag matching)
+    MemIndexEntry* FindAvx2(uint64_t key) {
+        if (!entries_ || !psl_) {
+            return nullptr;
+        }
+
+        uint64_t hash;
+        uint8_t tag;
+        HashUtil::ComputeHash(key, &hash, &tag);
+
+        uint64_t idx = hash & (capacity_ - 1);
+
+        // Broadcast target tag to all bytes of a 256-bit register
+        __m256i target_tag = _mm256_set1_epi8(static_cast<char>(tag));
+
         while (true) {
-            // If current PSL is less than our probe distance, key doesn't exist
-            if (psl_[idx] < dist) {
+            // Align index to 4-entry boundary
+            uint64_t aligned_idx = idx & ~3ULL;
+
+            // Gather 4 consecutive entry tags
+            alignas(32) uint8_t tags[32] = {0};
+            for (int i = 0; i < 4 && (aligned_idx + i) < capacity_; i++) {
+                tags[i] = entries_[aligned_idx + i].tag;
+            }
+
+            // Load tags and compare
+            __m256i entry_tags = _mm256_loadu_si256(reinterpret_cast<__m256i*>(tags));
+            __m256i cmp_result = _mm256_cmpeq_epi8(entry_tags, target_tag);
+            int mask = _mm256_movemask_epi8(cmp_result);
+
+            // Check low 4 bits for matches
+            int match_mask = mask & 0xF;
+            if (match_mask) {
+                while (match_mask) {
+                    int bit_pos = __builtin_ctz(match_mask);
+                    uint64_t check_idx = aligned_idx + bit_pos;
+
+                    if (check_idx < capacity_ &&
+                        entries_[check_idx].key == key &&
+                        !entries_[check_idx].is_deleted()) {
+                        return &entries_[check_idx];
+                    }
+                    match_mask &= (match_mask - 1);
+                }
+            }
+
+            // Check PSL to decide whether to continue probing
+            uint8_t dist = static_cast<uint8_t>(idx - aligned_idx) + 1;
+            bool should_continue = false;
+            for (int i = 0; i < 4 && (aligned_idx + i) < capacity_; i++) {
+                if (psl_[aligned_idx + i] >= dist + i) {
+                    should_continue = true;
+                    break;
+                }
+            }
+
+            if (!should_continue) {
                 return nullptr;
             }
 
-            MemIndexEntry& entry = entries_[idx];
+            idx = (aligned_idx + 4) & (capacity_ - 1);
 
-            // Fast tag filtering
-            if (entry.tag == tag && entry.key == key && !entry.is_deleted()) {
-                return &entry;
-            }
-
-            // Linear probe next position
-            idx = (idx + 1) & (capacity_ - 1);
-            dist++;
-
-            // Prefetch next position
-            __builtin_prefetch(&entries_[(idx + 1) & (capacity_ - 1)], 0, 3);
-
-            // Safety check
-            if (dist > 128) {
+            // Full-circle check
+            if (idx == (hash & (capacity_ - 1))) {
                 return nullptr;
             }
         }
     }
+
+    // AVX2 batch find with prefetch
+    void BatchFindAvx2(const uint64_t* keys, size_t count, MemIndexEntry** results) {
+        if (!entries_ || !psl_ || !keys || !results) {
+            for (size_t i = 0; i < count; i++) {
+                results[i] = nullptr;
+            }
+            return;
+        }
+
+        static constexpr size_t kBatchSize = 8;
+
+        for (size_t batch_start = 0; batch_start < count; batch_start += kBatchSize) {
+            size_t batch_count = std::min(kBatchSize, count - batch_start);
+
+            // Pre-compute hashes and prefetch target positions
+            alignas(32) uint64_t hashes[kBatchSize];
+            alignas(32) uint8_t tags[kBatchSize];
+
+            for (size_t i = 0; i < batch_count; i++) {
+                HashUtil::ComputeHash(keys[batch_start + i], &hashes[i], &tags[i]);
+            }
+
+            for (size_t i = 0; i < batch_count; i++) {
+                uint64_t idx = hashes[i] & (capacity_ - 1);
+                __builtin_prefetch(&entries_[idx], 0, 3);
+            }
+
+            // Dispatch each to FindAvx2
+            for (size_t i = 0; i < batch_count; i++) {
+                results[batch_start + i] = FindAvx2(keys[batch_start + i]);
+            }
+        }
+    }
+
+#else
+    // Non-AVX2 fallback: delegate to scalar implementations
+    MemIndexEntry* FindAvx2(uint64_t key) { return Find(key); }
+
+    void BatchFindAvx2(const uint64_t* keys, size_t count, MemIndexEntry** results) {
+        BatchFind(keys, count, results);
+    }
+#endif
 
     // Insert or update entry (Robin Hood Hashing)
     bool Upsert(uint64_t key, const MemIndexEntry& new_entry) {
@@ -242,6 +410,37 @@ public:
     std::bitset<kMemIndexSegmentCount> SnapshotDirtySegments() const { return dirty_segments_; }
 
 private:
+    // Core probing logic (no hash computation)
+    MemIndexEntry* FindInternal(uint64_t key, uint64_t idx, uint8_t tag) {
+        uint8_t dist = 0;
+
+        while (true) {
+            // If current PSL is less than our probe distance, key doesn't exist
+            if (psl_[idx] < dist) {
+                return nullptr;
+            }
+
+            MemIndexEntry& entry = entries_[idx];
+
+            // Fast tag filtering
+            if (entry.tag == tag && entry.key == key && !entry.is_deleted()) {
+                return &entry;
+            }
+
+            // Linear probe next position
+            idx = (idx + 1) & (capacity_ - 1);
+            dist++;
+
+            // Prefetch next position
+            __builtin_prefetch(&entries_[(idx + 1) & (capacity_ - 1)], 0, 3);
+
+            // Safety check
+            if (dist > 128) {
+                return nullptr;
+            }
+        }
+    }
+
     static uint64_t NextPowerOf2(uint64_t n) {
         n--;
         n |= n >> 1;

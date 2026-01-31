@@ -2379,6 +2379,29 @@ void Engine::ProcessWaitQueue() {
     }
 }
 
+void Engine::UpdateIndexOnWriteComplete(uint64_t key, const MemIndexEntry& entry,
+                                        bool is_compaction, uint16_t old_file_id,
+                                        uint32_t old_offset_index) {
+    MemIndexEntry* existing = mem_index_->Find(key);
+
+    if (existing == nullptr) {
+        mem_index_->Upsert(key, entry);
+        return;
+    }
+
+    if (is_compaction) {
+        // Compaction: only update if index still points to the old location.
+        // This prevents compaction from overwriting a newer user write.
+        if (existing->file_id == old_file_id &&
+            existing->offset_index == old_offset_index) {
+            mem_index_->Upsert(key, entry);
+        }
+    } else {
+        // User write: use sequence comparison (Upsert handles this internally)
+        mem_index_->Upsert(key, entry);
+    }
+}
+
 // C API implementation
 extern "C" {
 
