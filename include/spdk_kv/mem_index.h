@@ -20,6 +20,7 @@
 
 #include "spdk_kv/crc32.h"
 #include "spdk_kv/entry.h"
+#include "spdk_kv/huge_page_allocator.h"
 #include "spdk_kv/types.h"
 
 namespace spdk_kv {
@@ -67,13 +68,17 @@ public:
 // Memory index using Robin Hood Hashing
 class MemIndex {
 public:
-    // Create index with specified capacity
+    // Create index with specified capacity (standard allocation)
     explicit MemIndex(uint64_t max_entries, double load_factor = kDefaultLoadFactor)
             : capacity_(NextPowerOf2(static_cast<uint64_t>(max_entries / load_factor))),
               size_(0),
               global_sequence_(0),
+              numa_node_(-1),
               entries_(nullptr),
-              psl_(nullptr) {
+              psl_(nullptr),
+              alloc_method_(MemIndexAllocator::AllocMethod::ALIGNED_ALLOC),
+              alloc_base_(nullptr),
+              alloc_size_(0) {
         // Allocate and zero-initialize
         entries_ =
                 static_cast<MemIndexEntry*>(aligned_alloc(64, capacity_ * sizeof(MemIndexEntry)));
@@ -85,12 +90,46 @@ public:
         psl_ = static_cast<uint8_t*>(std::calloc(capacity_, 1));
     }
 
-    ~MemIndex() {
-        if (entries_) {
-            std::free(entries_);
+    // Create index with hugepage allocation and NUMA affinity
+    MemIndex(uint64_t max_entries, double load_factor, int numa_node,
+             HugePageAllocator::WarmupMode warmup = HugePageAllocator::WarmupMode::SYNC)
+            : capacity_(NextPowerOf2(static_cast<uint64_t>(max_entries / load_factor))),
+              size_(0),
+              global_sequence_(0),
+              numa_node_(numa_node),
+              entries_(nullptr),
+              psl_(nullptr),
+              alloc_method_(MemIndexAllocator::AllocMethod::ALIGNED_ALLOC),
+              alloc_base_(nullptr),
+              alloc_size_(0) {
+        size_t entries_size = capacity_ * sizeof(MemIndexEntry);
+        size_t psl_size = capacity_;
+        size_t total_size = entries_size + psl_size;
+
+        // Use hugepage allocator with fallback chain
+        auto result = MemIndexAllocator::AllocateIndexMemory(total_size, numa_node, warmup);
+        if (result.ptr) {
+            alloc_base_ = result.ptr;
+            alloc_size_ = total_size;
+            alloc_method_ = result.method;
+            entries_ = static_cast<MemIndexEntry*>(result.ptr);
+            psl_ = static_cast<uint8_t*>(result.ptr) + entries_size;
+            // Memory is already zeroed by the allocator
         }
-        if (psl_) {
-            std::free(psl_);
+    }
+
+    ~MemIndex() {
+        if (alloc_base_) {
+            // Hugepage allocation: single block covers both entries_ and psl_
+            MemIndexAllocator::FreeIndexMemory(alloc_base_, alloc_size_, alloc_method_);
+        } else {
+            // Standard allocation: separate blocks
+            if (entries_) {
+                std::free(entries_);
+            }
+            if (psl_) {
+                std::free(psl_);
+            }
         }
     }
 
@@ -559,9 +598,15 @@ private:
     uint64_t capacity_;
     uint64_t size_;
     uint32_t global_sequence_;
+    int numa_node_;
     MemIndexEntry* entries_;
     uint8_t* psl_;
     std::bitset<kMemIndexSegmentCount> dirty_segments_;
+
+    // Hugepage allocation tracking
+    MemIndexAllocator::AllocMethod alloc_method_;
+    void* alloc_base_;   // Base pointer for unified allocation (entries_ + psl_)
+    size_t alloc_size_;  // Total allocation size
 };
 
 }  // namespace spdk_kv

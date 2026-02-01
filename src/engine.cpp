@@ -1440,12 +1440,15 @@ void Engine::DeleteAsync(uint64_t key, KvCallback cb, void* cb_arg) {
 }
 
 void Engine::Poll() {
-    // 1. Process IO completions
+    // 1. Process IO completions (high priority)
     if (io_submitter_) {
         io_submitter_->ProcessCompletions(32);
     }
 
-    // 2. Process append buffer resets
+    // 2. Execute deferred callback tasks (RDMA send, index updates, user callbacks)
+    task_queue_.ProcessTasks(64);
+
+    // 3. Process append buffer resets
     if (buffer_manager_) {
         buffer_manager_->CheckPendingResets();
     }

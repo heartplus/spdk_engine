@@ -10,9 +10,11 @@
 #include <vector>
 
 #include "spdk_kv/append_buffer.h"
+#include "spdk_kv/callback_task_queue.h"
 #include "spdk_kv/checkpoint.h"
 #include "spdk_kv/compaction.h"
 #include "spdk_kv/crc32.h"
+#include "spdk_kv/dma_memory_pool.h"
 #include "spdk_kv/entry.h"
 #include "spdk_kv/io_submitter.h"
 #include "spdk_kv/mem_index.h"
@@ -122,6 +124,9 @@ public:
     // For internal/testing use
     MemIndex* GetMemIndex() { return mem_index_.get(); }
     const MemIndex* GetMemIndex() const { return mem_index_.get(); }
+
+    // Callback task queue (for deferred operations from IO callbacks)
+    CallbackTaskQueue& GetTaskQueue() { return task_queue_; }
 
     // Checkpoint operations
     void StartCheckpoint(KvCallback cb, void* cb_arg);
@@ -310,6 +315,12 @@ private:
 
     // Per-buffer pending write tracking for IO merge
     std::unordered_map<AppendBuffer*, std::vector<BufferedPendingWrite>> buffer_pending_writes_;
+
+    // Callback task queue for deferred IO callback work
+    CallbackTaskQueue task_queue_;
+
+    // NUMA-aware memory pools (optional, created when core_id is set)
+    std::unique_ptr<MemoryPools> memory_pools_;
 };
 
 // C-style API wrapper (for compatibility)
