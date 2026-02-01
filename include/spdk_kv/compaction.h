@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cerrno>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -237,6 +238,18 @@ private:
     // Validate entry
     bool ValidateEntry(const void* entry_data, size_t max_size);
 
+    // IO error handling with retry support
+    void HandleIoError(State retry_state, int error_code);
+
+    // Check if an error code is retryable
+    static bool IsRetryableError(int error_code);
+
+    // Revert a single committed index update during rollback
+    void RevertIndexUpdate(const MigratedEntry& update);
+
+    // Delete partially-written garbage destination file during rollback
+    void DeleteGarbageFile();
+
     // Members
     FileMetadata* src_file_;
     FileMetadata* dest_file_;
@@ -252,8 +265,11 @@ private:
     size_t entries_processed_;
     size_t entries_migrated_;
 
-    // Migrated entries for index update
+    // Migrated entries for index update (current batch, pending write)
     std::vector<MigratedEntry> migrated_entries_;
+
+    // Committed updates (already applied to index, needed for rollback)
+    std::vector<MigratedEntry> committed_updates_;
 
     // Simulation mode data
     const char* src_data_;
@@ -262,7 +278,11 @@ private:
     std::vector<char> read_buffer_;
     std::vector<char> write_buffer_;
     size_t write_buffer_used_;
+    size_t bytes_read_;
     bool io_pending_;
+
+    // Retry state tracking
+    State retry_target_state_;
 };
 
 // Compaction scheduler
