@@ -197,6 +197,7 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
     // Initialize checkpoint manager
     checkpoint_manager_ =
             std::make_unique<IncrementalCheckpoint>(mem_index_.get(), mem_index_->Capacity());
+    checkpoint_manager_->SetAppendBufferManager(buffer_manager_.get());
 
     // Initialize compaction scheduler
     compaction_scheduler_ = std::make_unique<CompactionScheduler>(mem_index_.get());
@@ -244,6 +245,39 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
     if (sb_err != KvError::kSuccess) {
         return sb_err;
     }
+
+    // Set superblock update callback for checkpoint atomicity
+    checkpoint_manager_->SetSuperblockUpdateCallback(
+            [this](uint32_t checkpoint_seq, const ActiveBufferPos* positions, uint8_t count,
+                   std::function<void(int)> on_complete) {
+                superblock_.checkpoint_global_seq = checkpoint_seq;
+                superblock_.checkpoint_sequence = checkpoint_manager_->GetCheckpointSequence() + 1;
+                superblock_.active_mem_index_area =
+                        superblock_.active_mem_index_area == 0 ? 1 : 0;
+                superblock_.active_file_id = active_file_id_;
+                superblock_.total_entries = mem_index_ ? mem_index_->Size() : 0;
+                superblock_.total_data_bytes = total_data_bytes_;
+                superblock_.total_garbage_bytes = total_garbage_bytes_;
+
+                superblock_.active_buffer_count = count;
+                for (uint8_t i = 0; i < count && i < kMaxBufferCount; i++) {
+                    superblock_.active_buffer_positions[i] = positions[i];
+                }
+
+                if (count > 0) {
+                    superblock_.checkpoint_file_id = positions[0].file_id;
+                    superblock_.checkpoint_page_index = positions[0].page_index;
+                }
+
+                for (const auto& f : files_) {
+                    UpdateSuperblockFileMapping(f.get());
+                }
+
+                KvError err = WriteSuperblock();
+                if (on_complete) {
+                    on_complete(err == KvError::kSuccess ? 0 : -1);
+                }
+            });
 
     return KvError::kSuccess;
 }
@@ -296,6 +330,45 @@ KvError Engine::LoadExisting(const OpenOpts& opts) {
     // Step 8: Initialize checkpoint manager
     checkpoint_manager_ =
             std::make_unique<IncrementalCheckpoint>(mem_index_.get(), mem_index_->Capacity());
+    checkpoint_manager_->SetAppendBufferManager(buffer_manager_.get());
+
+    // Set superblock update callback for checkpoint atomicity
+    checkpoint_manager_->SetSuperblockUpdateCallback(
+            [this](uint32_t checkpoint_seq, const ActiveBufferPos* positions, uint8_t count,
+                   std::function<void(int)> on_complete) {
+                // Update superblock with snapshot values from checkpoint
+                superblock_.checkpoint_global_seq = checkpoint_seq;
+                superblock_.checkpoint_sequence = checkpoint_manager_->GetCheckpointSequence() + 1;
+                superblock_.active_mem_index_area =
+                        superblock_.active_mem_index_area == 0 ? 1 : 0;
+                superblock_.active_file_id = active_file_id_;
+                superblock_.total_entries = mem_index_ ? mem_index_->Size() : 0;
+                superblock_.total_data_bytes = total_data_bytes_;
+                superblock_.total_garbage_bytes = total_garbage_bytes_;
+
+                // Use snapshot buffer positions (not current real-time values)
+                superblock_.active_buffer_count = count;
+                for (uint8_t i = 0; i < count && i < kMaxBufferCount; i++) {
+                    superblock_.active_buffer_positions[i] = positions[i];
+                }
+
+                // Set checkpoint file/page from the first active buffer position
+                if (count > 0) {
+                    superblock_.checkpoint_file_id = positions[0].file_id;
+                    superblock_.checkpoint_page_index = positions[0].page_index;
+                }
+
+                // Update file mappings
+                for (const auto& file : files_) {
+                    UpdateSuperblockFileMapping(file.get());
+                }
+
+                // Persist superblock
+                KvError err = WriteSuperblock();
+                if (on_complete) {
+                    on_complete(err == KvError::kSuccess ? 0 : -1);
+                }
+            });
 
     // Step 9: Initialize compaction scheduler
     compaction_scheduler_ = std::make_unique<CompactionScheduler>(mem_index_.get());
@@ -556,7 +629,33 @@ KvError Engine::RecoverMemIndex() {
     // Set the superblock for the loader
     loader.SetSuperblock(superblock_);
 
-    // Prepare file data for scanning
+    // Set SPDK resources if available (for real blob-based recovery)
+    auto& env = SpdkEnv::Instance();
+    if (env.IsInitialized() && superblock_blob_) {
+        // Determine MemIndex blob handles from superblock
+        // NOTE: In the current design, MemIndex blobs need to be opened separately.
+        // For now, pass nullptr for MemIndex blobs (they would need dedicated blob allocation).
+        spdk_blob* mem_index_blob_a = nullptr;
+        spdk_blob* mem_index_blob_b = nullptr;
+
+        loader.SetSpdkResources(env.GetBlobStore(), env.GetIoChannel(), superblock_blob_,
+                                mem_index_blob_a, mem_index_blob_b);
+
+        // Pass data blob info for incremental recovery scan
+        std::vector<IndexLoader::DataBlobInfo> data_blobs;
+        for (const auto& file : files_) {
+            if (file->state != FileState::kDeleted && file->blob_opened && file->blob) {
+                IndexLoader::DataBlobInfo bi;
+                bi.file_id = file->file_id;
+                bi.blob = file->blob;
+                bi.size = file->size;
+                data_blobs.push_back(bi);
+            }
+        }
+        loader.SetDataBlobs(data_blobs);
+    }
+
+    // Also prepare simulation-mode file data (for fallback or in-memory data)
     std::vector<IndexLoader::FileData> file_data;
     for (const auto& file : files_) {
         if (file->state != FileState::kDeleted && !file->data.empty()) {
@@ -1410,7 +1509,22 @@ void Engine::StartCheckpoint(KvCallback cb, void* cb_arg) {
         return;
     }
 
+    // Set global sequence (will be snapshotted atomically in StartCheckpoint)
     checkpoint_manager_->SetGlobalSequence(mem_index_->GetGlobalSequence());
+
+    // Set active buffer positions for snapshot
+    // These represent the current write positions in active data files.
+    // During recovery, scanning starts from these positions.
+    ActiveBufferPos positions[kMaxBufferCount];
+    uint8_t pos_count = 0;
+
+    FileInfo* active_file = GetActiveFile();
+    if (active_file) {
+        positions[0].file_id = active_file->file_id;
+        positions[0].page_index = active_file->write_offset / kPageSize;
+        pos_count = 1;
+    }
+    checkpoint_manager_->SetActiveBufferPositions(positions, pos_count);
 
     checkpoint_manager_->StartCheckpoint([cb, cb_arg](int status) {
         if (cb) {

@@ -10,6 +10,7 @@
 #include <functional>
 #include <vector>
 
+#include "spdk_kv/append_buffer.h"
 #include "spdk_kv/entry.h"
 #include "spdk_kv/mem_index.h"
 #include "spdk_kv/types.h"
@@ -59,6 +60,13 @@ struct CheckpointTrigger {
 
 // Checkpoint callback type
 using CheckpointCallback = std::function<void(int status)>;
+
+// Superblock update callback type
+// Called after segment data is synced, to atomically update superblock with snapshot values.
+// Parameters: checkpoint_seq, active_buffer_positions, buffer_count, completion callback
+using SuperblockUpdateCallback = std::function<void(
+        uint32_t checkpoint_seq, const ActiveBufferPos* positions, uint8_t count,
+        std::function<void(int status)> on_complete)>;
 
 // Incremental checkpoint manager
 class IncrementalCheckpoint {
@@ -119,6 +127,14 @@ public:
     const ActiveBufferPos* GetActiveBufferPositions() const { return active_buffer_positions_; }
     uint8_t GetActiveBufferCount() const { return active_buffer_count_; }
 
+    // Set AppendBufferManager for active buffer position snapshot
+    void SetAppendBufferManager(AppendBufferManager* mgr) { buffer_manager_ = mgr; }
+
+    // Set superblock update callback (called after sync to persist checkpoint atomically)
+    void SetSuperblockUpdateCallback(SuperblockUpdateCallback cb) {
+        superblock_update_cb_ = std::move(cb);
+    }
+
     // Set SPDK resources for real IO
     void SetSpdkResources(spdk_blob* mem_index_blob, spdk_io_channel* channel,
                           spdk_blob_store* blobstore);
@@ -131,6 +147,9 @@ public:
     bool DeserializeSegment(uint32_t segment_id, const void* buffer, size_t data_size);
 
 private:
+    // Snapshot active buffer positions from AppendBufferManager
+    void SnapshotActiveBufferPositions();
+
     // Internal helpers
     void ProcessNextSegment();
     void OnSegmentWritten(int status);
@@ -179,6 +198,12 @@ private:
 
     // Pending IO state for async segment writes
     bool io_pending_;
+
+    // AppendBufferManager reference for snapshotting active buffer positions
+    AppendBufferManager* buffer_manager_;
+
+    // Superblock update callback (called after sync to atomically persist checkpoint)
+    SuperblockUpdateCallback superblock_update_cb_;
 };
 
 }  // namespace spdk_kv

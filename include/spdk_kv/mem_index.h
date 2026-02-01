@@ -18,6 +18,7 @@
 #include <immintrin.h>
 #endif
 
+#include "spdk_kv/crc32.h"
 #include "spdk_kv/entry.h"
 #include "spdk_kv/types.h"
 
@@ -384,6 +385,109 @@ public:
                 }
             }
         }
+    }
+
+    // Serialize the full MemIndex to buffer (for non-incremental full checkpoint)
+    // Returns bytes written, or 0 on error.
+    // Format: SerializedMemIndexHeader + compact entries (only non-empty entries)
+    size_t Serialize(void* buffer, size_t buf_size) {
+        if (!entries_ || !psl_ || !buffer) {
+            return 0;
+        }
+
+        auto* output = static_cast<SerializedMemIndexHeader*>(buffer);
+        size_t header_size = sizeof(SerializedMemIndexHeader);
+
+        if (buf_size < header_size) {
+            return 0;
+        }
+
+        // Fill header
+        output->magic = kMemIndexMagic;
+        output->version = 1;
+        output->capacity = capacity_;
+        output->global_sequence = global_sequence_;
+
+        // Copy non-empty entries (including deleted ones, for completeness)
+        char* ptr = static_cast<char*>(buffer) + header_size;
+        size_t max_entries = (buf_size - header_size) / sizeof(MemIndexEntry);
+        uint64_t count = 0;
+
+        for (uint64_t i = 0; i < capacity_ && count < max_entries; i++) {
+            if (psl_[i] > 0) {
+                std::memcpy(ptr, &entries_[i], sizeof(MemIndexEntry));
+                ptr += sizeof(MemIndexEntry);
+                count++;
+            }
+        }
+
+        output->entry_count = count;
+
+        // Calculate checksum over entry data
+        size_t data_size = count * sizeof(MemIndexEntry);
+        output->checksum =
+                Crc32::Calculate(static_cast<char*>(buffer) + header_size, data_size);
+
+        std::memset(output->padding, 0, sizeof(output->padding));
+
+        return header_size + data_size;
+    }
+
+    // Deserialize compact entries from buffer into this MemIndex via upsert.
+    // Returns number of entries loaded, or 0 on error.
+    // Uses batch prefetch for performance optimization.
+    size_t Deserialize(const void* buffer, size_t data_size) {
+        if (!entries_ || !psl_ || !buffer || data_size < sizeof(SerializedMemIndexHeader)) {
+            return 0;
+        }
+
+        auto* header = static_cast<const SerializedMemIndexHeader*>(buffer);
+
+        // Validate magic and version
+        if (header->magic != kMemIndexMagic) {
+            return 0;
+        }
+
+        // Validate checksum
+        size_t entry_data_size = data_size - sizeof(SerializedMemIndexHeader);
+        const char* entry_data =
+                static_cast<const char*>(buffer) + sizeof(SerializedMemIndexHeader);
+        uint32_t computed = Crc32::Calculate(entry_data, entry_data_size);
+        if (computed != header->checksum) {
+            return 0;
+        }
+
+        uint64_t count = header->entry_count;
+        if (count * sizeof(MemIndexEntry) > entry_data_size) {
+            return 0;
+        }
+
+        auto* entries = reinterpret_cast<const MemIndexEntry*>(entry_data);
+
+        // Batch upsert with prefetch optimization
+        constexpr size_t kBatchSize = 64;
+        for (uint64_t i = 0; i < count; i += kBatchSize) {
+            // Prefetch next batch
+            for (size_t j = 0; j < kBatchSize && i + j + kBatchSize < count; j++) {
+                uint64_t key = entries[i + j + kBatchSize].key;
+                uint64_t hash = HashUtil::Hash(key);
+                uint64_t idx = hash & (capacity_ - 1);
+                __builtin_prefetch(&entries_[idx], 1, 3);
+            }
+
+            // Insert current batch
+            for (size_t j = 0; j < kBatchSize && i + j < count; j++) {
+                const MemIndexEntry& src = entries[i + j];
+                if (!src.is_deleted()) {
+                    Upsert(src.key, src);
+                }
+            }
+        }
+
+        // Restore global sequence
+        global_sequence_ = header->global_sequence;
+
+        return static_cast<size_t>(count);
     }
 
     // Mark segment as dirty (for incremental checkpoint)

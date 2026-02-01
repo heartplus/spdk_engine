@@ -23,7 +23,8 @@ IncrementalCheckpoint::IncrementalCheckpoint(MemIndex* mem_index, uint64_t capac
           mem_index_blob_(nullptr),
           io_channel_(nullptr),
           blobstore_(nullptr),
-          io_pending_(false) {
+          io_pending_(false),
+          buffer_manager_(nullptr) {
     std::memset(segment_versions_, 0, sizeof(segment_versions_));
     std::memset(active_buffer_positions_, 0, sizeof(active_buffer_positions_));
 
@@ -58,10 +59,16 @@ void IncrementalCheckpoint::StartCheckpoint(CheckpointCallback callback) {
     state_ = State::kSnapshoting;
 
     // === Atomic snapshot collection ===
+    // The following three operations must be done at the same instant for consistency:
+
     // 1. Record global sequence at checkpoint start
     checkpoint_start_sequence_ = global_sequence_;
 
-    // 2. Copy-on-Write: snapshot current dirty bitmap
+    // 2. Snapshot active buffer positions (recovery scans from these positions)
+    //    Must be captured at the same moment as checkpoint_start_sequence_
+    SnapshotActiveBufferPositions();
+
+    // 3. Copy-on-Write: snapshot current dirty bitmap, clear for new writes
     checkpoint_dirty_snapshot_ = dirty_segments_;
     dirty_segments_.reset();  // Clear for new writes
 
@@ -83,6 +90,34 @@ void IncrementalCheckpoint::StartCheckpoint(CheckpointCallback callback) {
     state_ = State::kWritingSegments;
     current_segment_idx_ = 0;
     ProcessNextSegment();
+}
+
+void IncrementalCheckpoint::SnapshotActiveBufferPositions() {
+    // If no buffer manager is set, use whatever was set via SetActiveBufferPositions
+    if (!buffer_manager_) {
+        return;
+    }
+
+    // NOTE: In a single-threaded polling model, this snapshot is atomic with
+    // checkpoint_start_sequence_ and the dirty bitmap snapshot above, because
+    // no IO completions can interleave within this function call.
+    //
+    // We snapshot each buffer's current file_id and page_index. During recovery,
+    // the scan starts from these positions to replay un-checkpointed writes.
+    active_buffer_count_ = 0;
+    for (size_t i = 0; i < kMaxBufferCount; i++) {
+        // In the current design, we only have a single active buffer.
+        // The buffer manager tracks the active buffer; we record its position.
+        AppendBuffer* buf = buffer_manager_->GetActiveBuffer();
+        if (buf && i == 0) {
+            // The active buffer position is tracked by the engine's file write offset,
+            // which is set externally via SetActiveBufferPositions before StartCheckpoint.
+            // The buffer manager itself doesn't track file_id/page_index directly.
+            // So we keep the values that were set via SetActiveBufferPositions.
+            active_buffer_count_ = std::max(active_buffer_count_, static_cast<uint8_t>(1));
+        }
+        break;
+    }
 }
 
 void IncrementalCheckpoint::SetSpdkResources(spdk_blob* mem_index_blob, spdk_io_channel* channel,
@@ -195,9 +230,23 @@ void IncrementalCheckpoint::OnSyncComplete(int status) {
         segment_versions_[seg_id]++;
     }
 
-    // Update superblock (in real SPDK mode, this would be async)
+    // === Two-phase sync: Phase 2 - Update Superblock as atomic marker ===
+    // CRITICAL: Must use snapshot values (captured at checkpoint start),
+    // NOT current real-time values, to ensure recovery consistency.
     state_ = State::kUpdatingSuperblock;
-    OnSuperblockUpdated(0);  // Simulation: immediate completion
+
+    if (superblock_update_cb_) {
+        // Real mode: async superblock update with snapshot values
+        superblock_update_cb_(checkpoint_start_sequence_, active_buffer_positions_,
+                              active_buffer_count_, [this](int sb_status) {
+                                  io_pending_ = false;
+                                  OnSuperblockUpdated(sb_status);
+                              });
+        io_pending_ = true;
+    } else {
+        // Simulation mode: immediate completion
+        OnSuperblockUpdated(0);
+    }
 }
 
 void IncrementalCheckpoint::OnSuperblockUpdated(int status) { CompleteCheckpoint(status); }

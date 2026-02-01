@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <spdk/blob.h>
+
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -77,6 +79,25 @@ public:
     // For simulation mode: set superblock directly
     void SetSuperblock(const Superblock& superblock) { superblock_ = superblock; }
 
+    // Set SPDK resources for real IO (blob-based recovery)
+    void SetSpdkResources(spdk_blob_store* blobstore, spdk_io_channel* channel,
+                          spdk_blob* superblock_blob, spdk_blob* mem_index_blob_a,
+                          spdk_blob* mem_index_blob_b) {
+        blobstore_ = blobstore;
+        io_channel_ = channel;
+        superblock_blob_ = superblock_blob;
+        mem_index_blob_a_ = mem_index_blob_a;
+        mem_index_blob_b_ = mem_index_blob_b;
+    }
+
+    // Set data blob handles for each file (used during incremental recovery scan)
+    struct DataBlobInfo {
+        uint16_t file_id;
+        spdk_blob* blob;
+        uint64_t size;  // File size in bytes
+    };
+    void SetDataBlobs(const std::vector<DataBlobInfo>& blobs) { data_blobs_ = blobs; }
+
     // For simulation mode: set file data for scanning
     struct FileData {
         uint16_t file_id;
@@ -112,7 +133,30 @@ private:
     // Upsert load (slow path, when capacity changed)
     void LoadByUpsert(int area);
 
-    // Build scan ranges
+    // SPDK blob-based loading
+    void LoadSuperblockFromBlob();
+    void LoadMemIndexAreaFromBlob(int area);
+    void ReadNextMemIndexChunk();
+    void OnMemIndexChunkLoaded(int status);
+    void OnMemIndexAreaLoadComplete();
+    void LoadAsMemoryDumpFromBlob(int area);
+    void LoadByUpsertFromBuffer();
+
+    // Scan data blobs for incremental recovery (real SPDK path)
+    void ScanNextFileBlob();
+    void ScanBlobChunk();
+    void OnScanBlobChunkLoaded(int status);
+
+    // Check if SPDK resources are available
+    bool HasSpdkResources() const { return blobstore_ != nullptr && io_channel_ != nullptr; }
+
+    // Get physical end of a data blob (in pages)
+    uint64_t GetBlobPhysicalEnd(spdk_blob* blob) const;
+
+    // Build scan ranges (SPDK path using blob info)
+    std::vector<ScanRange> BuildScanRangesFromBlobs();
+
+    // Build scan ranges (simulation path)
     std::vector<ScanRange> BuildScanRanges();
 
     // Validation
@@ -145,10 +189,33 @@ private:
     // Simulation mode file data
     std::vector<FileData> file_data_;
 
-    // Buffers (simulation mode)
+    // Buffers
     std::vector<char> superblock_buffer_;
     std::vector<char> mem_index_buffer_;
     std::vector<char> scan_buffer_;
+
+    // SPDK resources for real IO
+    spdk_blob_store* blobstore_;
+    spdk_io_channel* io_channel_;
+    spdk_blob* superblock_blob_;
+    spdk_blob* mem_index_blob_a_;
+    spdk_blob* mem_index_blob_b_;
+
+    // Data blob handles for incremental scan
+    std::vector<DataBlobInfo> data_blobs_;
+
+    // MemIndex area loading state
+    uint64_t mem_index_read_offset_;
+    uint64_t mem_index_total_size_;
+    int current_load_area_;
+
+    // Segment loading state (for memory dump)
+    uint32_t pending_segment_loads_;
+    bool has_load_error_;
+
+    // DMA buffer for blob IO
+    void* dma_buffer_;
+    size_t dma_buffer_size_;
 };
 
 }  // namespace spdk_kv
