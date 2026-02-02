@@ -52,8 +52,6 @@ bool IoSubmitter::Initialize(spdk_nvme_ctrlr* ctrlr, spdk_nvme_ns* ns, spdk_blob
     return true;
 }
 
-bool IoSubmitter::InitializeSimulation() { return true; }
-
 void IoSubmitter::SubmitWrite(AppendBuffer* buffer, uint64_t file_offset,
                               const std::vector<WriteContext>& contexts,
                               IoCompletionCallback callback) {
@@ -63,17 +61,6 @@ void IoSubmitter::SubmitWrite(AppendBuffer* buffer, uint64_t file_offset,
     pw.contexts = contexts;
     pw.callback = std::move(callback);
     pending_writes_.push(std::move(pw));
-}
-
-void IoSubmitter::SubmitRead(uint16_t file_id, uint64_t offset, uint32_t pages, void* buffer,
-                             IoCompletionCallback callback) {
-    auto* ctx = new ReadContext;
-    ctx->file_id = file_id;
-    ctx->offset = offset;
-    ctx->pages = pages;
-    ctx->buffer = buffer;
-    ctx->callback = std::move(callback);
-    pending_reads_.push(ctx);
 }
 
 void IoSubmitter::SubmitBlobRead(spdk_blob* blob, uint64_t offset, uint32_t pages, void* buffer,
@@ -114,23 +101,6 @@ size_t IoSubmitter::ProcessCompletions(size_t max_completions) {
     if (qpair_) {
         // Process NVMe completions
         count = spdk_nvme_qpair_process_completions(qpair_, max_completions);
-    }
-
-    // Process simulation callbacks
-    while (!completed_callbacks_.empty() && count < max_completions) {
-        auto& cb = completed_callbacks_.front();
-        if (cb.first) {
-            cb.first(cb.second);
-        }
-        completed_callbacks_.pop();
-        count++;
-    }
-
-    // Cleanup completed reads
-    while (!pending_reads_.empty()) {
-        auto* ctx = pending_reads_.front();
-        pending_reads_.pop();
-        delete ctx;
     }
 
     return count;

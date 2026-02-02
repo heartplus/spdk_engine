@@ -59,11 +59,10 @@ struct OpenOpts {
 // File info (runtime)
 struct FileInfo {
     uint16_t file_id;
-    uint64_t blob_id;  // In simulation mode, this is just a local ID
+    uint64_t blob_id;
     FileState state;
     uint64_t size;
     uint64_t write_offset;
-    std::vector<char> data;  // In-memory storage for simulation
 
     spdk_blob* blob;   // SPDK blob handle
     bool blob_opened;  // Whether blob is opened
@@ -84,8 +83,11 @@ struct FileInfo {
     }
 };
 
-// KV Engine class (simulation mode - no actual SPDK)
+// KV Engine class
 class Engine {
+    friend class CompactionTask;
+    friend class CompactionScheduler;
+
 public:
     Engine();
     ~Engine();
@@ -94,22 +96,22 @@ public:
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
-    // Lifecycle operations (synchronous for simulation)
+    // Lifecycle operations (synchronous)
     KvError Create(const std::string& path, const CreateOpts& opts);
     KvError Open(const std::string& path, const OpenOpts& opts);
     KvError Close();
 
-    // KV operations (synchronous for simulation)
+    // KV operations (synchronous)
     KvError Put(uint64_t key, const void* value, uint32_t value_len);
     KvError Get(uint64_t key, void* value_buf, uint32_t buf_len, uint32_t* actual_len);
     KvError Delete(uint64_t key);
 
-    // Async-style operations (callbacks called immediately in simulation)
+    // Async-style operations
     void PutAsync(uint64_t key, const void* value, uint32_t value_len, KvCallback cb, void* cb_arg);
     void GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCallback cb, void* cb_arg);
     void DeleteAsync(uint64_t key, KvCallback cb, void* cb_arg);
 
-    // Polling (no-op in simulation, but provided for API compatibility)
+    // Polling (call in main loop to process IO completions)
     void Poll();
 
     // Status
@@ -144,6 +146,10 @@ public:
 
     // Get file metadata (for compaction)
     FileMetadata* GetFileMetadata(uint16_t file_id);
+    const std::unordered_map<uint16_t, FileMetadata>& GetFileMetadataMap() const;
+
+    // Remove a file after compaction (close blob, delete blob, erase metadata)
+    void CompactionRemoveFile(uint16_t file_id, std::function<void(bool)> callback);
 
     // RDMA two-phase commit interface
     void BuildEntryInplaceRdma(void* slot, uint64_t key, uint32_t len, uint32_t seq,
@@ -357,14 +363,14 @@ int spdk_kv_get(spdk_kv_handle handle, uint64_t key, void* value_buf, uint32_t b
                 uint32_t* actual_len);
 int spdk_kv_del(spdk_kv_handle handle, uint64_t key);
 
-// Async C API (callbacks called immediately in simulation mode)
+// Async C API
 void spdk_kv_put_async(spdk_kv_handle handle, uint64_t key, const void* value, uint32_t value_len,
                        spdk_kv_cb cb, void* cb_arg);
 void spdk_kv_get_async(spdk_kv_handle handle, uint64_t key, void* value_buf, uint32_t buf_len,
                        spdk_kv_get_cb cb, void* cb_arg);
 void spdk_kv_del_async(spdk_kv_handle handle, uint64_t key, spdk_kv_cb cb, void* cb_arg);
 
-// Polling (no-op in simulation)
+// Polling
 void spdk_kv_poll(spdk_kv_handle handle);
 
 // Statistics

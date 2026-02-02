@@ -75,18 +75,11 @@ public:
     // Get IO channel
     spdk_io_channel* GetChannel() { return io_channel_; }
 
-    // Initialize for simulation mode
-    bool InitializeSimulation();
-
     // Submit a write request
     void SubmitWrite(AppendBuffer* buffer, uint64_t file_offset,
                      const std::vector<WriteContext>& contexts, IoCompletionCallback callback);
 
-    // Submit a read request (simulation mode)
-    void SubmitRead(uint16_t file_id, uint64_t offset, uint32_t pages, void* buffer,
-                    IoCompletionCallback callback);
-
-    // Submit a read request with blob handle (SPDK mode)
+    // Submit a read request with blob handle
     void SubmitBlobRead(spdk_blob* blob, uint64_t offset, uint32_t pages, void* buffer,
                         IoCompletionCallback callback);
 
@@ -97,11 +90,8 @@ public:
     // Get pending write count
     size_t PendingWriteCount() const { return pending_writes_.size(); }
 
-    // Get pending read count
-    size_t PendingReadCount() const { return pending_reads_.size(); }
-
     // Check if there are pending IOs
-    bool HasPendingIo() const { return !pending_writes_.empty() || !pending_reads_.empty(); }
+    bool HasPendingIo() const { return !pending_writes_.empty(); }
 
     // Flush pending writes
     void FlushPendingWrites();
@@ -129,11 +119,6 @@ private:
         IoCompletionCallback callback;
     };
     std::queue<PendingWrite> pending_writes_;
-
-    std::queue<ReadContext*> pending_reads_;
-
-    // Completed operations (for simulation)
-    std::queue<std::pair<IoCompletionCallback, int>> completed_callbacks_;
 };
 
 // Flush trigger for determining when to submit IO

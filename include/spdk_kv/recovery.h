@@ -76,7 +76,7 @@ public:
     // Get recovered max sequence
     uint32_t GetRecoveredMaxSequence() const { return recovered_max_sequence_; }
 
-    // For simulation mode: set superblock directly
+    // Set superblock directly (for pre-loaded superblock)
     void SetSuperblock(const Superblock& superblock) { superblock_ = superblock; }
 
     // Set SPDK resources for real IO (blob-based recovery)
@@ -98,14 +98,6 @@ public:
     };
     void SetDataBlobs(const std::vector<DataBlobInfo>& blobs) { data_blobs_ = blobs; }
 
-    // For simulation mode: set file data for scanning
-    struct FileData {
-        uint16_t file_id;
-        uint64_t size;
-        const char* data;
-    };
-    void SetFileData(const std::vector<FileData>& files) { file_data_ = files; }
-
     // Parse and rebuild entries from a buffer
     // Returns the number of entries processed
     size_t ParseAndRebuildEntries(const void* buffer, size_t buffer_size, uint16_t file_id,
@@ -122,7 +114,6 @@ private:
     void CompareAndSelectArea();
     void DeserializeMemIndex(int area);
     void StartIncrementalRebuild();
-    void ScanNextFile();
     void FinalizeRecovery();
 
     // Memory dump load (fast path)
@@ -153,11 +144,8 @@ private:
     // Get physical end of a data blob (in pages)
     uint64_t GetBlobPhysicalEnd(spdk_blob* blob) const;
 
-    // Build scan ranges (SPDK path using blob info)
+    // Build scan ranges from blob info
     std::vector<ScanRange> BuildScanRangesFromBlobs();
-
-    // Build scan ranges (simulation path)
-    std::vector<ScanRange> BuildScanRanges();
 
     // Validation
     bool ValidateSuperblock(const Superblock& sb);
@@ -185,9 +173,6 @@ private:
     std::vector<ScanRange> scan_ranges_;
     size_t current_scan_idx_;
     uint64_t current_scan_offset_;
-
-    // Simulation mode file data
-    std::vector<FileData> file_data_;
 
     // Buffers
     std::vector<char> superblock_buffer_;

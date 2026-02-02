@@ -17,6 +17,7 @@ This repository is currently empty and in initial setup phase. This file should 
 - build with cmake
 - use .clang-format for c++ code style
 - make sure compile pass
+- no simulation
 
 ## Common Development Considerations
 

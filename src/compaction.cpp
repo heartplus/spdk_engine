@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "spdk_kv/crc32.h"
+#include "spdk_kv/engine.h"
 
 namespace spdk_kv {
 
@@ -170,10 +171,14 @@ void RateLimiter::Reset() {
 // CompactionTask implementation
 // ============================================================================
 
-CompactionTask::CompactionTask(FileMetadata* src_file, MemIndex* mem_index)
-        : src_file_(src_file),
-          dest_file_(nullptr),
-          mem_index_(mem_index),
+CompactionTask::CompactionTask(uint16_t src_file_id, Engine* engine)
+        : engine_(engine),
+          src_file_id_(src_file_id),
+          dest_file_id_(0),
+          src_file_info_(nullptr),
+          dest_file_info_(nullptr),
+          src_meta_(nullptr),
+          dest_meta_(nullptr),
           state_(State::kInit),
           last_error_(0),
           retry_count_(0),
@@ -182,17 +187,14 @@ CompactionTask::CompactionTask(FileMetadata* src_file, MemIndex* mem_index)
           dest_offset_(0),
           entries_processed_(0),
           entries_migrated_(0),
-          src_data_(nullptr),
-          src_size_(0),
+          read_buffer_(nullptr),
+          write_buffer_(nullptr),
           write_buffer_used_(0),
           bytes_read_(0),
           io_pending_(false),
-          retry_target_state_(State::kInit) {
-    read_buffer_.resize(kChunkSize);
-    write_buffer_.resize(kChunkSize);
-}
+          retry_target_state_(State::kInit) {}
 
-CompactionTask::~CompactionTask() {}
+CompactionTask::~CompactionTask() { FreeDmaBuffers(); }
 
 void CompactionTask::Step() {
     if (io_pending_) {
@@ -256,16 +258,34 @@ void CompactionTask::Step() {
 }
 
 void CompactionTask::Init() {
-    // Allocate destination file
-    // In real SPDK mode, this would call engine_->allocate_data_file()
-    // For simulation, dest_file_ should be set via SetDestFile()
-
-    if (!dest_file_) {
-        // Create a new FileMetadata for destination
-        // This should be handled by the scheduler in practice
+    // Allocate DMA buffers
+    read_buffer_ = DmaAllocator::Alloc(kChunkSize, kPageSize);
+    write_buffer_ = DmaAllocator::Alloc(kChunkSize, kPageSize);
+    if (!read_buffer_ || !write_buffer_) {
+        last_error_ = -ENOMEM;
+        state_ = State::kFailed;
+        return;
     }
 
-    dest_data_.clear();
+    // Resolve source file info and metadata
+    src_file_info_ = engine_->GetFile(src_file_id_);
+    src_meta_ = engine_->GetFileMetadata(src_file_id_);
+    if (!src_file_info_ || !src_meta_) {
+        last_error_ = -ENOENT;
+        state_ = State::kFailed;
+        return;
+    }
+
+    // Allocate destination file
+    dest_file_info_ = engine_->AllocateNewFile();
+    if (!dest_file_info_) {
+        last_error_ = -ENOSPC;
+        state_ = State::kFailed;
+        return;
+    }
+    dest_file_id_ = dest_file_info_->file_id;
+    dest_meta_ = engine_->GetFileMetadata(dest_file_id_);
+
     dest_offset_ = sizeof(DataFileHeader);
     migrated_entries_.clear();
 
@@ -273,22 +293,30 @@ void CompactionTask::Init() {
 }
 
 void CompactionTask::MarkCompacting() {
-    src_file_->state = FileState::kCompacting;
+    src_meta_->state = FileState::kCompacting;
+    src_file_info_->state = FileState::kCompacting;
 
-    // In real SPDK mode, update file header asynchronously
-    // For simulation, immediate transition
-    state_ = State::kReadChunk;
+    io_pending_ = true;
+    WriteFileHeader(src_file_info_, FileState::kCompacting, [this](int status) {
+        io_pending_ = false;
+        if (status == 0) {
+            state_ = State::kReadChunk;
+        } else {
+            HandleIoError(State::kMarkCompacting, status);
+        }
+    });
 }
 
 void CompactionTask::SkipInvalidPages() {
-    if (!src_file_->valid_bitmap) {
+    if (!src_meta_->valid_bitmap) {
         return;
     }
 
+    uint64_t src_end = src_file_info_->write_offset;
     // Skip pages that are marked invalid
-    while (current_offset_ < src_size_) {
+    while (current_offset_ < src_end) {
         uint32_t page_idx = static_cast<uint32_t>(current_offset_ / kPageSize);
-        if (src_file_->IsPageValid(page_idx)) {
+        if (src_meta_->IsPageValid(page_idx)) {
             break;
         }
         current_offset_ += kPageSize;
@@ -299,7 +327,8 @@ void CompactionTask::ReadNextChunk() {
     // Skip invalid pages
     SkipInvalidPages();
 
-    if (current_offset_ >= src_size_) {
+    uint64_t src_end = src_file_info_->write_offset;
+    if (current_offset_ >= src_end) {
         // All data processed
         if (write_buffer_used_ > 0) {
             state_ = State::kWriteChunk;
@@ -309,21 +338,22 @@ void CompactionTask::ReadNextChunk() {
         return;
     }
 
-    size_t read_size = std::min(kChunkSize, src_size_ - current_offset_);
+    size_t read_size = std::min(kChunkSize, static_cast<size_t>(src_end - current_offset_));
+    // Align read size up to page boundary
+    read_size = AlignUp(read_size, kPageSize);
 
-    // In simulation mode, copy from source data
-    if (src_data_ && current_offset_ + read_size <= src_size_) {
-        std::memcpy(read_buffer_.data(), src_data_ + current_offset_, read_size);
-    }
-
-    bytes_read_ = read_size;
-
-    // In real SPDK mode, this would be async:
-    // io_pending_ = true;
-    // spdk_blob_io_read(blob, channel, read_buffer_, current_offset_ / kPageSize,
-    //                   read_size / kPageSize, on_read_complete, this);
-    // For simulation, process immediately
-    state_ = State::kProcessEntries;
+    io_pending_ = true;
+    engine_->SubmitBlobRead(
+            src_file_info_, current_offset_, read_buffer_, static_cast<uint32_t>(read_size),
+            [this, read_size](int status) {
+                io_pending_ = false;
+                if (status == 0) {
+                    bytes_read_ = read_size;
+                    state_ = State::kProcessEntries;
+                } else {
+                    HandleIoError(State::kReadChunk, status);
+                }
+            });
 }
 
 bool CompactionTask::ValidateEntry(const void* entry_data, size_t max_size) {
@@ -359,8 +389,10 @@ bool CompactionTask::ValidateEntry(const void* entry_data, size_t max_size) {
 }
 
 void CompactionTask::ProcessEntries() {
-    const char* ptr = read_buffer_.data();
+    const char* ptr = static_cast<char*>(read_buffer_);
+    char* wptr = static_cast<char*>(write_buffer_);
     size_t offset = 0;
+    MemIndex* mem_index = engine_->GetMemIndex();
 
     while (offset < bytes_read_) {
         // Validate entry
@@ -382,12 +414,12 @@ void CompactionTask::ProcessEntries() {
         entries_processed_++;
 
         // Check if this entry is still valid in the current index
-        MemIndexEntry* current = mem_index_->Find(key);
+        MemIndexEntry* current = mem_index->Find(key);
         bool should_migrate = false;
 
         if (current && !current->is_deleted()) {
             // Check if current index points to this entry in the source file
-            if (current->file_id == src_file_->file_id) {
+            if (current->file_id == src_file_id_) {
                 uint32_t entry_offset_index =
                         static_cast<uint32_t>((current_offset_ + offset) / kPageSize);
                 if (current->offset_index == entry_offset_index) {
@@ -398,7 +430,7 @@ void CompactionTask::ProcessEntries() {
 
         if (should_migrate && !(header->flags & kFlagDeleted)) {
             // Check if write buffer has space
-            if (write_buffer_used_ + entry_size > write_buffer_.size()) {
+            if (write_buffer_used_ + entry_size > kChunkSize) {
                 // Write buffer full - flush it first, then re-read this chunk
                 // (current_offset_ is NOT advanced, so ReadNextChunk will re-read)
                 state_ = State::kWriteChunk;
@@ -406,15 +438,15 @@ void CompactionTask::ProcessEntries() {
             }
 
             // Copy entry to write buffer
-            std::memcpy(write_buffer_.data() + write_buffer_used_, ptr + offset, entry_size);
+            std::memcpy(wptr + write_buffer_used_, ptr + offset, entry_size);
 
             // Record migration info
             MigratedEntry migrated;
             migrated.key = key;
-            migrated.old_file_id = src_file_->file_id;
+            migrated.old_file_id = src_file_id_;
             migrated.old_offset_index =
                     static_cast<uint32_t>((current_offset_ + offset) / kPageSize);
-            migrated.new_file_id = dest_file_ ? dest_file_->file_id : 0;
+            migrated.new_file_id = dest_file_id_;
             migrated.new_offset_index =
                     static_cast<uint32_t>((dest_offset_ + write_buffer_used_) / kPageSize);
             migrated.page_count = static_cast<uint16_t>(entry_size / kPageSize);
@@ -439,24 +471,26 @@ void CompactionTask::WriteChunk() {
         return;
     }
 
-    // In simulation mode, append to dest_data_
-    size_t old_size = dest_data_.size();
-    dest_data_.resize(old_size + write_buffer_used_);
-    std::memcpy(dest_data_.data() + old_size, write_buffer_.data(), write_buffer_used_);
-
-    // In real SPDK mode, this would be async:
-    // io_pending_ = true;
-    // spdk_blob_io_write(blob, channel, write_buffer_, dest_offset_ / kPageSize,
-    //                    write_buffer_used_ / kPageSize, on_write_complete, this);
-    // For simulation, proceed to index update immediately
-    retry_count_ = 0;  // Reset retry count on successful write
-    state_ = State::kUpdateIndices;
+    io_pending_ = true;
+    engine_->SubmitBlobWrite(
+            dest_file_info_, dest_offset_, write_buffer_,
+            static_cast<uint32_t>(write_buffer_used_), [this](int status) {
+                io_pending_ = false;
+                if (status == 0) {
+                    retry_count_ = 0;
+                    state_ = State::kUpdateIndices;
+                } else {
+                    HandleIoError(State::kWriteChunk, status);
+                }
+            });
 }
 
 void CompactionTask::UpdateIndices() {
+    MemIndex* mem_index = engine_->GetMemIndex();
+
     // Update memory indices for migrated entries
     for (const auto& migrated : migrated_entries_) {
-        MemIndexEntry* current = mem_index_->Find(migrated.key);
+        MemIndexEntry* current = mem_index->Find(migrated.key);
         if (current) {
             // Only update if still pointing to old location
             // (prevents overwriting a newer user write that happened during compaction)
@@ -474,8 +508,10 @@ void CompactionTask::UpdateIndices() {
                               migrated_entries_.end());
     migrated_entries_.clear();
 
-    // Advance destination offset
+    // Advance destination offset and update dest file write_offset
     dest_offset_ += write_buffer_used_;
+    dest_file_info_->write_offset = dest_offset_;
+    dest_file_info_->size = dest_offset_;
     write_buffer_used_ = 0;
 
     // Continue reading next chunk
@@ -494,27 +530,23 @@ void CompactionTask::Finalize() {
 }
 
 void CompactionTask::MarkDeleted() {
-    src_file_->state = FileState::kDeleted;
-    src_file_->valid_entries = 0;
-    src_file_->valid_bytes = 0;
+    src_meta_->state = FileState::kDeleted;
+    src_meta_->valid_entries = 0;
+    src_meta_->valid_bytes = 0;
 
-    // In real SPDK mode, this would:
-    // 1. Async update file header
-    // 2. Close and free the blob
-    // 3. Free DMA read/write buffers
-    // io_pending_ = true;
-    // update_file_header_async(src_file_, [this](int status) {
-    //     io_pending_ = false;
-    //     // Free DMA buffers from pool
-    //     state_ = State::kDone;
-    // });
-
-    // For simulation, proceed immediately
-    // Clear committed updates (no longer needed since compaction succeeded)
-    committed_updates_.clear();
-    migrated_entries_.clear();
-
-    state_ = State::kDone;
+    io_pending_ = true;
+    WriteFileHeader(src_file_info_, FileState::kDeleted, [this](int status) {
+        io_pending_ = false;
+        if (status == 0) {
+            // Clear committed updates (no longer needed since compaction succeeded)
+            committed_updates_.clear();
+            migrated_entries_.clear();
+            FreeDmaBuffers();
+            state_ = State::kDone;
+        } else {
+            HandleIoError(State::kMarkDeleted, status);
+        }
+    });
 }
 
 void CompactionTask::CheckRetryTimeout() {
@@ -557,6 +589,9 @@ bool CompactionTask::IsRetryableError(int error_code) {
 }
 
 void CompactionTask::StartRollback() {
+    MemIndex* mem_index = engine_->GetMemIndex();
+    (void)mem_index;
+
     // 1. Revert all committed index updates (restore indices to point at source file)
     for (const auto& update : committed_updates_) {
         RevertIndexUpdate(update);
@@ -570,16 +605,15 @@ void CompactionTask::StartRollback() {
     migrated_entries_.clear();
 
     // 2. Clean up the partially-written destination file
-    if (dest_file_ && dest_offset_ > sizeof(DataFileHeader)) {
+    if (dest_file_info_ && dest_offset_ > sizeof(DataFileHeader)) {
         DeleteGarbageFile();
     } else {
-        // No meaningful data written to dest, go straight to restoring source state
         state_ = State::kRollbackMarkSealed;
     }
 }
 
 void CompactionTask::RevertIndexUpdate(const MigratedEntry& update) {
-    MemIndexEntry* existing = mem_index_->Find(update.key);
+    MemIndexEntry* existing = engine_->GetMemIndex()->Find(update.key);
     if (!existing) {
         return;
     }
@@ -594,56 +628,100 @@ void CompactionTask::RevertIndexUpdate(const MigratedEntry& update) {
 }
 
 void CompactionTask::DeleteGarbageFile() {
-    // Mark dest file as deleted
-    if (dest_file_) {
-        dest_file_->state = FileState::kDeleted;
-        dest_file_->valid_entries = 0;
-        dest_file_->valid_bytes = 0;
+    // Mark dest file and metadata as deleted
+    if (dest_file_info_) {
+        dest_file_info_->state = FileState::kDeleted;
+    }
+    if (dest_meta_) {
+        dest_meta_->state = FileState::kDeleted;
+        dest_meta_->valid_entries = 0;
+        dest_meta_->valid_bytes = 0;
     }
 
-    // In real SPDK mode, this would async close and delete the blob:
-    // io_pending_ = true;
-    // spdk_blob_close(dest_file_->blob, on_blob_closed_for_delete, this);
-    // For simulation, just discard data and proceed
-    dest_data_.clear();
-    dest_file_ = nullptr;
-
-    state_ = State::kRollbackMarkSealed;
+    // Async close and delete the destination blob
+    io_pending_ = true;
+    engine_->CompactionRemoveFile(dest_file_id_, [this](bool /*success*/) {
+        io_pending_ = false;
+        state_ = State::kRollbackMarkSealed;
+    });
 }
 
 void CompactionTask::RollbackMarkSealed() {
     // Restore source file to SEALED state (it can be compacted again later)
-    src_file_->state = FileState::kSealed;
+    if (src_file_info_) {
+        src_file_info_->state = FileState::kSealed;
+    }
+    if (src_meta_) {
+        src_meta_->state = FileState::kSealed;
+    }
 
-    // In real SPDK mode, this would async update the file header:
-    // io_pending_ = true;
-    // update_file_header_async(src_file_, [this](int status) { ... });
-    // For simulation, proceed immediately
+    // Async update the file header to persist sealed state
+    io_pending_ = true;
+    WriteFileHeader(src_file_info_, FileState::kSealed, [this](int /*status*/) {
+        io_pending_ = false;
 
-    // Clean up any remaining data
-    migrated_entries_.clear();
-    committed_updates_.clear();
-    dest_data_.clear();
-    write_buffer_used_ = 0;
+        // Clean up remaining data
+        migrated_entries_.clear();
+        committed_updates_.clear();
+        write_buffer_used_ = 0;
+        FreeDmaBuffers();
 
-    state_ = State::kFailed;
+        state_ = State::kFailed;
+    });
+}
+
+void CompactionTask::FreeDmaBuffers() {
+    if (read_buffer_) {
+        DmaAllocator::Free(read_buffer_);
+        read_buffer_ = nullptr;
+    }
+    if (write_buffer_) {
+        DmaAllocator::Free(write_buffer_);
+        write_buffer_ = nullptr;
+    }
+}
+
+void CompactionTask::WriteFileHeader(FileInfo* file, FileState new_state,
+                                     std::function<void(int status)> callback) {
+    void* dma_buf = DmaAllocator::AllocZeroed(kPageSize, kPageSize);
+    if (!dma_buf) {
+        if (callback) {
+            callback(-ENOMEM);
+        }
+        return;
+    }
+
+    auto* header = static_cast<DataFileHeader*>(dma_buf);
+    header->magic = kDataFileHeaderMagic;
+    header->version = 1;
+    header->file_id = file->file_id;
+    header->state = new_state;
+    header->create_time = 0;
+    header->checksum = Crc32::Calculate(header, sizeof(*header) - sizeof(header->checksum));
+
+    engine_->SubmitBlobWrite(file, 0, dma_buf, kPageSize,
+                             [dma_buf, callback](int status) {
+                                 DmaAllocator::Free(dma_buf);
+                                 if (callback) {
+                                     callback(status);
+                                 }
+                             });
 }
 
 // ============================================================================
 // CompactionScheduler implementation
 // ============================================================================
 
-CompactionScheduler::CompactionScheduler(MemIndex* mem_index)
-        : mem_index_(mem_index),
+CompactionScheduler::CompactionScheduler(Engine* engine)
+        : engine_(engine),
           rate_limiter_(kMaxIopsPerSec),
           compaction_paused_(false),
-          pending_foreground_count_(0),
-          file_metadata_(nullptr) {}
+          pending_foreground_count_(0) {}
 
 CompactionScheduler::~CompactionScheduler() {}
 
-void CompactionScheduler::ScheduleCompaction(FileMetadata* file) {
-    auto task = std::make_unique<CompactionTask>(file, mem_index_);
+void CompactionScheduler::ScheduleCompaction(uint16_t file_id) {
+    auto task = std::make_unique<CompactionTask>(file_id, engine_);
     pending_tasks_.push(std::move(task));
 }
 
@@ -713,12 +791,10 @@ void CompactionScheduler::Poll() {
 std::vector<FileMetadata*> CompactionScheduler::SelectFilesForCompaction(double min_garbage_ratio) {
     std::vector<FileMetadata*> candidates;
 
-    if (!file_metadata_) {
-        return candidates;
-    }
+    const auto& file_metadata = engine_->GetFileMetadataMap();
 
-    for (auto& pair : *file_metadata_) {
-        FileMetadata* file = &pair.second;
+    for (auto& pair : file_metadata) {
+        FileMetadata* file = const_cast<FileMetadata*>(&pair.second);
         if (file->NeedsCompaction() && file->GarbageRatio() >= min_garbage_ratio) {
             candidates.push_back(file);
         }

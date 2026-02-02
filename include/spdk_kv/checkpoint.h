@@ -102,7 +102,6 @@ public:
     std::bitset<kMemIndexSegmentCount> SnapshotDirtySegments() const { return dirty_segments_; }
 
     // Start async checkpoint
-    // In simulation mode, this is synchronous
     void StartCheckpoint(CheckpointCallback callback);
 
     // Poll checkpoint progress (call in main loop)

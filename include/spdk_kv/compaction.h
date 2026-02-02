@@ -13,6 +13,7 @@
 
 #include "spdk_kv/entry.h"
 #include "spdk_kv/mem_index.h"
+#include "spdk_kv/spdk_env.h"
 #include "spdk_kv/types.h"
 
 namespace spdk_kv {
@@ -146,6 +147,9 @@ private:
     uint64_t token_interval_ns_;
 };
 
+// Forward declarations
+struct FileInfo;
+
 // Compaction task
 class CompactionTask {
 public:
@@ -176,10 +180,10 @@ public:
     static constexpr uint64_t kRetryDelayUs = 1000;    // 1ms
     static constexpr size_t kChunkSize = 1024 * 1024;  // 1MB
 
-    CompactionTask(FileMetadata* src_file, MemIndex* mem_index);
+    CompactionTask(uint16_t src_file_id, Engine* engine);
     ~CompactionTask();
 
-    // Execute one step (non-blocking in SPDK mode)
+    // Execute one step (non-blocking)
     void Step();
 
     // Check if task is complete
@@ -191,20 +195,8 @@ public:
     // Get last error
     int GetLastError() const { return last_error_; }
 
-    // Get source file
-    FileMetadata* GetSourceFile() { return src_file_; }
-
-    // For simulation mode: set destination file
-    void SetDestFile(FileMetadata* dest_file) { dest_file_ = dest_file; }
-
-    // For simulation mode: set source data
-    void SetSourceData(const char* data, size_t size) {
-        src_data_ = data;
-        src_size_ = size;
-    }
-
-    // For simulation mode: get destination data
-    const std::vector<char>& GetDestData() const { return dest_data_; }
+    // Get source file ID
+    uint16_t GetSourceFileId() const { return src_file_id_; }
 
     // Get migrated entries info (for index update)
     struct MigratedEntry {
@@ -250,10 +242,21 @@ private:
     // Delete partially-written garbage destination file during rollback
     void DeleteGarbageFile();
 
+    // Free DMA read/write buffers
+    void FreeDmaBuffers();
+
+    // Write file header to blob at offset 0
+    void WriteFileHeader(FileInfo* file, FileState new_state,
+                         std::function<void(int status)> callback);
+
     // Members
-    FileMetadata* src_file_;
-    FileMetadata* dest_file_;
-    MemIndex* mem_index_;
+    Engine* engine_;
+    uint16_t src_file_id_;
+    uint16_t dest_file_id_;
+    FileInfo* src_file_info_;
+    FileInfo* dest_file_info_;
+    FileMetadata* src_meta_;
+    FileMetadata* dest_meta_;
     State state_;
     int last_error_;
     int retry_count_;
@@ -271,12 +274,9 @@ private:
     // Committed updates (already applied to index, needed for rollback)
     std::vector<MigratedEntry> committed_updates_;
 
-    // Simulation mode data
-    const char* src_data_;
-    size_t src_size_;
-    std::vector<char> dest_data_;
-    std::vector<char> read_buffer_;
-    std::vector<char> write_buffer_;
+    // DMA buffers for IO
+    void* read_buffer_;
+    void* write_buffer_;
     size_t write_buffer_used_;
     size_t bytes_read_;
     bool io_pending_;
@@ -298,7 +298,7 @@ public:
     static constexpr size_t kResumeThreshold = 100;    // Resume when < 100 pending
     static constexpr size_t kThrottleThreshold = 500;  // Throttle when > 500 pending
 
-    CompactionScheduler(MemIndex* mem_index);
+    explicit CompactionScheduler(Engine* engine);
     ~CompactionScheduler();
 
     // Non-copyable
@@ -306,7 +306,7 @@ public:
     CompactionScheduler& operator=(const CompactionScheduler&) = delete;
 
     // Schedule a file for compaction
-    void ScheduleCompaction(FileMetadata* file);
+    void ScheduleCompaction(uint16_t file_id);
 
     // Poll compaction progress (call in main loop)
     void Poll();
@@ -323,11 +323,6 @@ public:
     // Check if any task is active
     bool HasActiveTask() const { return active_task_ != nullptr; }
 
-    // For simulation: set file metadata map
-    void SetFileMetadata(std::unordered_map<uint16_t, FileMetadata>* file_metadata) {
-        file_metadata_ = file_metadata;
-    }
-
     // Select files for compaction based on garbage ratio
     std::vector<FileMetadata*> SelectFilesForCompaction(double min_garbage_ratio = 0.3);
 
@@ -343,15 +338,12 @@ private:
 #endif
     }
 
-    MemIndex* mem_index_;
+    Engine* engine_;
     RateLimiter rate_limiter_;
     std::queue<std::unique_ptr<CompactionTask>> pending_tasks_;
     std::unique_ptr<CompactionTask> active_task_;
     bool compaction_paused_;
     size_t pending_foreground_count_;
-
-    // File metadata reference (for simulation)
-    std::unordered_map<uint16_t, FileMetadata>* file_metadata_;
 };
 
 }  // namespace spdk_kv

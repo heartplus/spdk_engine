@@ -200,8 +200,7 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
     checkpoint_manager_->SetAppendBufferManager(buffer_manager_.get());
 
     // Initialize compaction scheduler
-    compaction_scheduler_ = std::make_unique<CompactionScheduler>(mem_index_.get());
-    compaction_scheduler_->SetFileMetadata(&file_metadata_);
+    compaction_scheduler_ = std::make_unique<CompactionScheduler>(this);
 
     // Initialize IO submitter
     io_submitter_ = std::make_unique<IoSubmitter>();
@@ -371,8 +370,7 @@ KvError Engine::LoadExisting(const OpenOpts& opts) {
             });
 
     // Step 9: Initialize compaction scheduler
-    compaction_scheduler_ = std::make_unique<CompactionScheduler>(mem_index_.get());
-    compaction_scheduler_->SetFileMetadata(&file_metadata_);
+    compaction_scheduler_ = std::make_unique<CompactionScheduler>(this);
 
     // Step 10: Restore statistics from superblock
     total_data_bytes_ = superblock_.total_data_bytes;
@@ -655,19 +653,6 @@ KvError Engine::RecoverMemIndex() {
         loader.SetDataBlobs(data_blobs);
     }
 
-    // Also prepare simulation-mode file data (for fallback or in-memory data)
-    std::vector<IndexLoader::FileData> file_data;
-    for (const auto& file : files_) {
-        if (file->state != FileState::kDeleted && !file->data.empty()) {
-            IndexLoader::FileData fd;
-            fd.file_id = file->file_id;
-            fd.size = file->size;
-            fd.data = file->data.data();
-            file_data.push_back(fd);
-        }
-    }
-    loader.SetFileData(file_data);
-
     // Start recovery
     KvError recovery_error = KvError::kSuccess;
     loader.StartRecovery([&recovery_error](KvError status) { recovery_error = status; });
@@ -946,7 +931,7 @@ KvError Engine::Put(uint64_t key, const void* value, uint32_t value_len) {
 
     // Get active file
     FileInfo* file = GetActiveFile();
-    if (!file || file->write_offset + aligned_size > config_.data_file_size) {
+    if (!file || !file->blob_opened || file->write_offset + aligned_size > config_.data_file_size) {
         // Seal current file and create new one
         if (file) {
             file->state = FileState::kSealed;
@@ -958,18 +943,44 @@ KvError Engine::Put(uint64_t key, const void* value, uint32_t value_len) {
         active_file_id_ = file->file_id;
     }
 
+    // Allocate DMA buffer and build entry
+    void* dma_buffer = DmaAllocator::AllocZeroed(aligned_size, kPageSize);
+    if (!dma_buffer) {
+        return KvError::kInternalError;
+    }
+
     // Allocate sequence number
     uint32_t seq = mem_index_->AllocateSequence();
 
-    // Build entry in file
-    void* slot = file->data.data() + file->write_offset;
-    BuildEntryInplace(slot, key, value, value_len, seq);
+    // Build entry in DMA buffer
+    BuildEntryInplace(dma_buffer, key, value, value_len, seq);
+
+    // Write to blob synchronously (poll until complete)
+    uint64_t write_offset = file->write_offset;
+    bool write_done = false;
+    int write_status = 0;
+
+    SubmitBlobWrite(file, write_offset, dma_buffer, static_cast<uint32_t>(aligned_size),
+                    [&write_done, &write_status](int status) {
+                        write_status = status;
+                        write_done = true;
+                    });
+
+    while (!write_done) {
+        SpdkEnv::Instance().Poll();
+    }
+
+    DmaAllocator::Free(dma_buffer);
+
+    if (write_status != 0) {
+        return KvError::kIoError;
+    }
 
     // Update index
     MemIndexEntry entry;
     entry.key = key;
     entry.file_id = file->file_id;
-    entry.offset_index = static_cast<uint32_t>(file->write_offset / kPageSize);
+    entry.offset_index = static_cast<uint32_t>(write_offset / kPageSize);
     entry.page_count = static_cast<uint16_t>(aligned_size / kPageSize);
     entry.deleted = 0;
     entry.sequence = seq;
@@ -1016,36 +1027,67 @@ KvError Engine::Get(uint64_t key, void* value_buf, uint32_t buf_len, uint32_t* a
 
     // Get file
     FileInfo* file = GetFile(entry->file_id);
-    if (!file || !file->IsReadable()) {
+    if (!file || !file->IsReadable() || !file->blob_opened) {
         return KvError::kIoError;
     }
 
-    // Calculate offset
+    // Calculate read size (read the full entry)
+    uint32_t read_pages = entry->page_count;
+    uint32_t read_size = read_pages * kPageSize;
+
+    // Allocate DMA buffer for reading
+    void* dma_buffer = DmaAllocator::Alloc(read_size, kPageSize);
+    if (!dma_buffer) {
+        return KvError::kInternalError;
+    }
+
     uint64_t offset = entry->offset_index * kPageSize;
 
-    // Read entry header
-    auto* header = reinterpret_cast<EntryHeader*>(file->data.data() + offset);
+    // Read from blob synchronously (poll until complete)
+    bool read_done = false;
+    int read_status = 0;
+
+    SubmitBlobRead(file, offset, dma_buffer, read_size,
+                   [&read_done, &read_status](int status) {
+                       read_status = status;
+                       read_done = true;
+                   });
+
+    while (!read_done) {
+        SpdkEnv::Instance().Poll();
+    }
+
+    if (read_status != 0) {
+        DmaAllocator::Free(dma_buffer);
+        return KvError::kIoError;
+    }
+
+    // Parse entry header
+    auto* header = static_cast<EntryHeader*>(dma_buffer);
     if (!header->is_valid()) {
+        DmaAllocator::Free(dma_buffer);
         return KvError::kCorruption;
     }
 
     // Get value length
-    uint32_t value_len = *reinterpret_cast<uint32_t*>(file->data.data() + offset +
-                                                      sizeof(EntryHeader) + sizeof(uint64_t));
+    uint32_t value_len = *reinterpret_cast<uint32_t*>(
+            static_cast<char*>(dma_buffer) + sizeof(EntryHeader) + sizeof(uint64_t));
 
     if (actual_len) {
         *actual_len = value_len;
     }
 
     if (value_len > buf_len) {
+        DmaAllocator::Free(dma_buffer);
         return KvError::kValueTooLarge;
     }
 
     // Copy value
-    void* value_ptr =
-            file->data.data() + offset + sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t);
+    void* value_ptr = static_cast<char*>(dma_buffer) + sizeof(EntryHeader) + sizeof(uint64_t) +
+                      sizeof(uint32_t);
     std::memcpy(value_buf, value_ptr, value_len);
 
+    DmaAllocator::Free(dma_buffer);
     return KvError::kSuccess;
 }
 
@@ -1065,9 +1107,12 @@ KvError Engine::Delete(uint64_t key) {
     size_t entry_size = header_size + sizeof(uint32_t);  // +checksum
     size_t aligned_size = AlignUp(entry_size, kPageSize);
 
+    // Track garbage from the old entry
+    uint64_t old_size = existing->page_count * kPageSize;
+
     // Get active file
     FileInfo* file = GetActiveFile();
-    if (!file || file->write_offset + aligned_size > config_.data_file_size) {
+    if (!file || !file->blob_opened || file->write_offset + aligned_size > config_.data_file_size) {
         if (file) {
             file->state = FileState::kSealed;
         }
@@ -1078,18 +1123,43 @@ KvError Engine::Delete(uint64_t key) {
         active_file_id_ = file->file_id;
     }
 
+    // Allocate DMA buffer and build tombstone entry
+    void* dma_buffer = DmaAllocator::AllocZeroed(aligned_size, kPageSize);
+    if (!dma_buffer) {
+        return KvError::kInternalError;
+    }
+
     // Allocate sequence number
     uint32_t seq = mem_index_->AllocateSequence();
 
-    // Build tombstone entry
-    void* slot = file->data.data() + file->write_offset;
-    BuildEntryInplace(slot, key, nullptr, 0, seq, true);
+    // Build tombstone entry in DMA buffer
+    BuildEntryInplace(dma_buffer, key, nullptr, 0, seq, true);
+
+    // Write to blob synchronously (poll until complete)
+    uint64_t write_offset = file->write_offset;
+    bool write_done = false;
+    int write_status = 0;
+
+    SubmitBlobWrite(file, write_offset, dma_buffer, static_cast<uint32_t>(aligned_size),
+                    [&write_done, &write_status](int status) {
+                        write_status = status;
+                        write_done = true;
+                    });
+
+    while (!write_done) {
+        SpdkEnv::Instance().Poll();
+    }
+
+    DmaAllocator::Free(dma_buffer);
+
+    if (write_status != 0) {
+        return KvError::kIoError;
+    }
 
     // Update index
     mem_index_->Remove(key);
 
     // Track garbage
-    uint64_t old_size = existing->page_count * kPageSize;
     total_garbage_bytes_ += old_size;
 
     // Update file offset
@@ -1562,10 +1632,7 @@ void Engine::ScheduleCompaction(uint16_t file_id) {
         return;
     }
 
-    auto it = file_metadata_.find(file_id);
-    if (it != file_metadata_.end()) {
-        compaction_scheduler_->ScheduleCompaction(&it->second);
-    }
+    compaction_scheduler_->ScheduleCompaction(file_id);
 }
 
 size_t Engine::GetGarbageRatio() const {
@@ -1578,6 +1645,48 @@ size_t Engine::GetGarbageRatio() const {
 FileMetadata* Engine::GetFileMetadata(uint16_t file_id) {
     auto it = file_metadata_.find(file_id);
     return (it != file_metadata_.end()) ? &it->second : nullptr;
+}
+
+const std::unordered_map<uint16_t, FileMetadata>& Engine::GetFileMetadataMap() const {
+    return file_metadata_;
+}
+
+void Engine::CompactionRemoveFile(uint16_t file_id, std::function<void(bool)> callback) {
+    FileInfo* file = GetFile(file_id);
+    if (!file) {
+        if (callback) {
+            callback(false);
+        }
+        return;
+    }
+
+    // Close the blob first, then delete it
+    CloseBlobForFile(file, [this, file_id, file, callback](bool close_ok) {
+        if (!close_ok) {
+            if (callback) {
+                callback(false);
+            }
+            return;
+        }
+
+        auto& env = SpdkEnv::Instance();
+        if (!env.IsInitialized()) {
+            if (callback) {
+                callback(false);
+            }
+            return;
+        }
+
+        // Delete the blob
+        env.DeleteBlob(file->blob_id, [this, file_id, callback](int status) {
+            // Clean up metadata
+            file_metadata_.erase(file_id);
+
+            if (callback) {
+                callback(status == 0);
+            }
+        });
+    });
 }
 
 uint64_t Engine::GetEntryCount() const { return mem_index_ ? mem_index_->Size() : 0; }

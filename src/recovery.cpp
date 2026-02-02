@@ -37,7 +37,7 @@ IndexLoader::IndexLoader(MemIndex* mem_index)
     mem_index_versions_[1] = 0;
     std::memset(&superblock_, 0, sizeof(superblock_));
 
-    // Allocate buffers for simulation
+    // Allocate buffers
     superblock_buffer_.resize(sizeof(Superblock));
     mem_index_buffer_.resize(64 * 1024 * 1024);  // 64MB
     scan_buffer_.resize(1024 * 1024);             // 1MB
@@ -82,10 +82,10 @@ void IndexLoader::TransitionTo(State new_state) { state_ = new_state; }
 
 void IndexLoader::LoadSuperblockPrimary() {
     if (HasSpdkResources() && superblock_blob_) {
-        // Real SPDK mode: async read from blob
+        // Async read from blob
         LoadSuperblockFromBlob();
     } else {
-        // Simulation mode: superblock is already set via SetSuperblock()
+        // Superblock already set via SetSuperblock()
         if (ValidateSuperblock(superblock_)) {
             TransitionTo(State::kLoadingMemIndexA);
             LoadMemIndexArea(0);
@@ -192,7 +192,7 @@ void IndexLoader::LoadSuperblockFromBlob() {
 }
 
 void IndexLoader::LoadSuperblockBackup() {
-    // Simulation mode: no backup superblock available
+    // Fallback: validate pre-loaded superblock
     if (ValidateSuperblock(superblock_)) {
         TransitionTo(State::kLoadingMemIndexA);
         LoadMemIndexArea(0);
@@ -211,14 +211,14 @@ void IndexLoader::LoadSuperblockBackup() {
 
 void IndexLoader::LoadMemIndexArea(int area) {
     if (HasSpdkResources()) {
-        // Real SPDK mode: async read from blob
+        // Async read from blob
         LoadMemIndexAreaFromBlob(area);
     } else {
-        // Simulation mode: skip actual loading, use superblock metadata
+        // No SPDK resources: use superblock metadata
         if (area == 0) {
             mem_index_versions_[0] = superblock_.checkpoint_sequence;
         } else {
-            mem_index_versions_[1] = 0;  // Assume B is older in simulation
+            mem_index_versions_[1] = 0;  // Assume B is older
         }
 
         if (area == 0) {
@@ -430,8 +430,7 @@ bool IndexLoader::CanUseMemoryDumpLoad() const {
 
 void IndexLoader::LoadAsMemoryDump(int area) {
     (void)area;
-    // Simulation mode memory dump: not applicable (no blob data)
-    // Fall back to upsert
+    // No SPDK resources: fall back to upsert
     LoadByUpsert(area);
 }
 
@@ -520,8 +519,8 @@ void IndexLoader::RebuildPslArray() {
 
 void IndexLoader::LoadByUpsert(int area) {
     (void)area;
-    // Simulation mode: mem_index is already populated externally
-    // In real mode, use LoadByUpsertFromBuffer() instead
+    // No SPDK resources: mem_index is already populated externally
+    // With SPDK resources, use LoadByUpsertFromBuffer() instead
 }
 
 void IndexLoader::LoadByUpsertFromBuffer() {
@@ -579,11 +578,9 @@ void IndexLoader::StartIncrementalRebuild() {
     checkpoint_page_index_ = superblock_.checkpoint_page_index;
     recovered_max_sequence_ = superblock_.checkpoint_global_seq;
 
-    // Build scan ranges based on available resources
-    if (HasSpdkResources() && !data_blobs_.empty()) {
+    // Build scan ranges from blob info
+    if (!data_blobs_.empty()) {
         scan_ranges_ = BuildScanRangesFromBlobs();
-    } else {
-        scan_ranges_ = BuildScanRanges();
     }
 
     if (scan_ranges_.empty()) {
@@ -597,7 +594,9 @@ void IndexLoader::StartIncrementalRebuild() {
     if (HasSpdkResources() && !data_blobs_.empty()) {
         ScanNextFileBlob();
     } else {
-        ScanNextFile();
+        // No SPDK resources and no data blobs: finalize directly
+        TransitionTo(State::kFinalizingRecovery);
+        FinalizeRecovery();
     }
 }
 
@@ -644,65 +643,6 @@ std::vector<ScanRange> IndexLoader::BuildScanRangesFromBlobs() {
               [](const ScanRange& a, const ScanRange& b) { return a.file_id < b.file_id; });
 
     return ranges;
-}
-
-std::vector<ScanRange> IndexLoader::BuildScanRanges() {
-    std::vector<ScanRange> ranges;
-
-    for (const auto& file : file_data_) {
-        ScanRange range;
-        range.file_id = file.file_id;
-
-        if (file.file_id == checkpoint_file_id_) {
-            range.start_page = checkpoint_page_index_;
-        } else if (file.file_id > checkpoint_file_id_) {
-            range.start_page = sizeof(DataFileHeader) / kPageSize;
-        } else {
-            continue;
-        }
-
-        range.end_page = file.size / kPageSize;
-
-        if (range.end_page > range.start_page) {
-            ranges.push_back(range);
-        }
-    }
-
-    std::sort(ranges.begin(), ranges.end(),
-              [](const ScanRange& a, const ScanRange& b) { return a.file_id < b.file_id; });
-
-    return ranges;
-}
-
-// --- Simulation mode file scanning (unchanged) ---
-
-void IndexLoader::ScanNextFile() {
-    if (current_scan_idx_ >= scan_ranges_.size()) {
-        TransitionTo(State::kFinalizingRecovery);
-        FinalizeRecovery();
-        return;
-    }
-
-    const auto& range = scan_ranges_[current_scan_idx_];
-    current_scan_offset_ = range.start_page * kPageSize;
-
-    const char* data = nullptr;
-    size_t size = 0;
-    for (const auto& file : file_data_) {
-        if (file.file_id == range.file_id) {
-            data = file.data;
-            size = file.size;
-            break;
-        }
-    }
-
-    if (data && size > current_scan_offset_) {
-        ParseAndRebuildEntries(data + current_scan_offset_, size - current_scan_offset_,
-                               range.file_id, current_scan_offset_);
-    }
-
-    current_scan_idx_++;
-    ScanNextFile();
 }
 
 // --- SPDK blob-based file scanning ---
@@ -807,7 +747,7 @@ void IndexLoader::ScanBlobChunk() {
 }
 
 // =========================================================================
-// Entry Parsing (shared between simulation and SPDK paths)
+// Entry Parsing
 // =========================================================================
 
 size_t IndexLoader::ParseAndRebuildEntries(const void* buffer, size_t buffer_size, uint16_t file_id,
@@ -920,8 +860,7 @@ bool IndexLoader::ValidateSuperblock(const Superblock& sb) {
     // Validate checksum
     uint32_t stored = sb.checksum;
     uint32_t computed = Crc32::Calculate(&sb, sizeof(Superblock) - sizeof(uint32_t));
-    if (stored != computed && stored != 0) {
-        // Allow checksum == 0 for backwards compatibility (simulation mode)
+    if (stored != computed) {
         return false;
     }
 

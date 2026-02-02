@@ -204,7 +204,7 @@ void IncrementalCheckpoint::ProcessNextSegment() {
                 },
                 write_ctx);
     } else {
-        // Fallback: immediate completion (no SPDK resources available)
+        // No SPDK resources available: immediate completion
         OnSegmentWritten(0);
     }
 }
@@ -244,7 +244,7 @@ void IncrementalCheckpoint::OnSyncComplete(int status) {
                               });
         io_pending_ = true;
     } else {
-        // Simulation mode: immediate completion
+        // Fallback: immediate completion (no superblock update callback set)
         OnSuperblockUpdated(0);
     }
 }
