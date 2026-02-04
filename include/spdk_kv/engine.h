@@ -83,6 +83,11 @@ struct FileInfo {
     }
 };
 
+struct SegmentBuf {
+    iovec buffers_[16];
+    size_t cnt_ = 0;
+};
+
 // KV Engine class
 class Engine {
     friend class CompactionTask;
@@ -106,8 +111,12 @@ public:
     KvError Get(uint64_t key, void* value_buf, uint32_t buf_len, uint32_t* actual_len);
     KvError Delete(uint64_t key);
 
-    // Async-style operations
-    void PutAsync(uint64_t key, const void* value, uint32_t value_len, KvCallback cb, void* cb_arg);
+    // TODO: 输入参数，由多个buffer 组成
+    // 每个buffer的地址和长度， 已经是dma对齐了的(地址和长度都是4KB)
+    // 第一个segment，最前面的256byte 为用户数据，不能写入
+    // 从256 到 512byte 之间，可以用来存放entry header + key + value_len + crcofvalue
+    // 写入盘时，从0开始写入整个segment
+    void PutAsync(uint64_t key, SegmentBuf input_buf, KvCallback cb, void* cb_arg);
     void GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCallback cb, void* cb_arg);
     void DeleteAsync(uint64_t key, KvCallback cb, void* cb_arg);
 
@@ -188,6 +197,8 @@ private:
     // SPDK async IO operations
     void SubmitBlobWrite(FileInfo* file, uint64_t offset, void* data, uint32_t length,
                          std::function<void(int status)> callback);
+    void SubmitBlobWritev(FileInfo* file, uint64_t offset, const SegmentBuf& buf,
+                          uint32_t total_length, std::function<void(int status)> callback);
     void SubmitBlobRead(FileInfo* file, uint64_t offset, void* buffer, uint32_t length,
                         std::function<void(int status)> callback);
 
@@ -229,6 +240,8 @@ private:
     struct PendingWriteRequest {
         uint64_t key;
         void* dma_buffer;
+        SegmentBuf segment_buf;
+        bool is_segment_write;
         uint32_t aligned_size;
         uint32_t sequence;
         uint16_t page_count;

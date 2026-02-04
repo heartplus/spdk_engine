@@ -92,8 +92,13 @@ enum class PutMode : uint8_t {
 };
 
 // Entry flags
-constexpr uint8_t kFlagDeleted = 0x01;     // Tombstone marker
-constexpr uint8_t kFlagCompaction = 0x02;  // Entry created by compaction
+constexpr uint8_t kFlagDeleted = 0x01;      // Tombstone marker
+constexpr uint8_t kFlagCompaction = 0x02;   // Entry created by compaction
+constexpr uint8_t kFlagSegmentBuf = 0x04;   // SegmentBuf zero-copy format
+
+// SegmentBuf on-disk layout offsets within the first segment
+constexpr size_t kSegmentMetaOffset = 256;   // Metadata starts at byte 256
+constexpr size_t kSegmentDataOffset = 512;   // Data resumes at byte 512
 
 // Callback type
 using KvCallback = void (*)(void* arg, int status);

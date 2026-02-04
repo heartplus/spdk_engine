@@ -175,8 +175,8 @@ void MainThreadLoop() {
 
             switch (task.type) {
                 case TaskType::kPut:
-                    g_engine->PutAsync(task.key, task.value.data(), task.value_len, OnPutComplete,
-                                       ctx);
+                    g_engine->PutBuffered(task.key, task.value.data(), task.value_len,
+                                          OnPutComplete, ctx);
                     break;
 
                 case TaskType::kGet:
