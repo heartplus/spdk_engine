@@ -111,13 +111,16 @@ public:
     KvError Get(uint64_t key, void* value_buf, uint32_t buf_len, uint32_t* actual_len);
     KvError Delete(uint64_t key);
 
-    // TODO: 输入参数，由多个buffer 组成
-    // 每个buffer的地址和长度， 已经是dma对齐了的(地址和长度都是4KB)
     // 第一个segment，最前面的256byte 为用户数据，不能写入
     // 从256 到 512byte 之间，可以用来存放entry header + key + value_len + crcofvalue
     // 写入盘时，从0开始写入整个segment
     void PutAsync(uint64_t key, SegmentBuf input_buf, KvCallback cb, void* cb_arg);
-    void GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCallback cb, void* cb_arg);
+    // output buf中为输出的内存地址
+    // 每段内存均为4K地址对齐，可以用来直接DMA读写
+    // 实际读取的值长度通过cb参数返回，用户根据实际长度使用对应的内存区域
+    // 要求从nvme 上读取的数据，包含前面256byte的头部，以及 256-512byte的entry header + key +
+    // value_len + crc等信息 用户会自行剔除前512byte的头部，获取真正的value数据
+    void GetAsync(uint64_t key, SegmentBuf* output, KvGetCallback cb, void* cb_arg);
     void DeleteAsync(uint64_t key, KvCallback cb, void* cb_arg);
 
     // Polling (call in main loop to process IO completions)
@@ -201,6 +204,8 @@ private:
                           uint32_t total_length, std::function<void(int status)> callback);
     void SubmitBlobRead(FileInfo* file, uint64_t offset, void* buffer, uint32_t length,
                         std::function<void(int status)> callback);
+    void SubmitBlobReadv(FileInfo* file, uint64_t offset, const SegmentBuf& buf,
+                         uint32_t total_length, std::function<void(int status)> callback);
 
     // Get SPDK blob for a file
     spdk_blob* GetBlobForFile(uint16_t file_id);
@@ -217,9 +222,8 @@ private:
     // Async IO completion contexts and handlers
     struct GetReadCompletionCtx {
         Engine* engine;
-        void* dma_buffer;
-        void* value_buf;
-        uint32_t buf_len;
+        SegmentBuf* output;  // User-provided buffer (4KB aligned)
+        uint32_t read_size;  // Total bytes to read
         KvGetCallback cb;
         void* cb_arg;
     };

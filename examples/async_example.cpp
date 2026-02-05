@@ -116,6 +116,8 @@ std::atomic<bool> g_running{true};
 struct CompletionContext {
     uint64_t task_id;
     TaskType type;
+    SegmentBuf* segment_buf;  // For Get: holds output buffer pointers
+    void* dma_buffer;         // For Get: DMA buffer to be freed after completion
 };
 
 void OnPutComplete(void* arg, int status) {
@@ -134,6 +136,12 @@ void OnPutComplete(void* arg, int status) {
 void OnGetComplete(void* arg, int status, uint32_t actual_len) {
     auto* ctx = static_cast<CompletionContext*>(arg);
     TaskResult result{ctx->task_id, ctx->type, status, actual_len};
+
+    // Free the DMA buffer that was pre-allocated for GetAsync
+    if (ctx->dma_buffer) {
+        DmaAllocator::Free(ctx->dma_buffer);
+    }
+    delete ctx->segment_buf;
 
     while (!g_result_queue.TryPush(result)) {
         // Result queue full, spin wait
@@ -171,7 +179,7 @@ void MainThreadLoop() {
                 break;
             }
 
-            auto* ctx = new CompletionContext{task.task_id, task.type};
+            auto* ctx = new CompletionContext{task.task_id, task.type, nullptr, nullptr};
 
             switch (task.type) {
                 case TaskType::kPut:
@@ -179,11 +187,33 @@ void MainThreadLoop() {
                                           OnPutComplete, ctx);
                     break;
 
-                case TaskType::kGet:
-                    g_engine->GetAsync(task.key, task.read_buf->data(),
-                                       static_cast<uint32_t>(task.read_buf->size()), OnGetComplete,
-                                       ctx);
+                case TaskType::kGet: {
+                    // Pre-allocate DMA buffer for GetAsync (zero-copy read)
+                    // Use the expected read buffer size, aligned to 4KB
+                    uint32_t buf_size = AlignUp(
+                            static_cast<uint64_t>(task.read_buf->size()) + kSegmentDataOffset,
+                            kPageSize);
+                    void* dma_buf = DmaAllocator::Alloc(buf_size, kPageSize);
+                    if (!dma_buf) {
+                        // Allocation failed, report error via result queue
+                        TaskResult result{task.task_id, task.type,
+                                          static_cast<int>(KvError::kInternalError), 0};
+                        while (!g_result_queue.TryPush(result)) {}
+                        delete ctx;
+                        g_completed++;
+                        break;
+                    }
+
+                    // Setup SegmentBuf with pre-allocated DMA buffer
+                    ctx->segment_buf = new SegmentBuf{};
+                    ctx->segment_buf->cnt_ = 1;
+                    ctx->segment_buf->buffers_[0].iov_base = dma_buf;
+                    ctx->segment_buf->buffers_[0].iov_len = buf_size;
+                    ctx->dma_buffer = dma_buf;
+
+                    g_engine->GetAsync(task.key, ctx->segment_buf, OnGetComplete, ctx);
                     break;
+                }
 
                 case TaskType::kDelete:
                     g_engine->DeleteAsync(task.key, OnDeleteComplete, ctx);

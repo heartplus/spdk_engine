@@ -1324,8 +1324,7 @@ void Engine::PutAsync(uint64_t key, SegmentBuf input_buf, KvCallback cb, void* c
                      });
 }
 
-void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCallback cb,
-                      void* cb_arg) {
+void Engine::GetAsync(uint64_t key, SegmentBuf* output, KvGetCallback cb, void* cb_arg) {
     if (state_ != EngineState::kReady) {
         if (cb) {
             cb(cb_arg, static_cast<int>(KvError::kEngineNotReady), 0);
@@ -1333,7 +1332,7 @@ void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCall
         return;
     }
 
-    if (!value_buf || buf_len == 0) {
+    if (!output || output->cnt_ == 0) {
         if (cb) {
             cb(cb_arg, static_cast<int>(KvError::kInvalidArgument), 0);
         }
@@ -1365,15 +1364,21 @@ void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCall
         return;
     }
 
-    // Calculate read size (read the full entry)
+    // Calculate read size (read the full entry including 512-byte header)
     uint32_t read_pages = entry->page_count;
     uint32_t read_size = read_pages * kPageSize;
 
-    // Allocate DMA buffer for reading
-    void* dma_buffer = DmaAllocator::Alloc(read_size, kPageSize);
-    if (!dma_buffer) {
+    // Calculate total buffer size provided by user
+    // Each segment is 4KB aligned (address), but iov_len can be > 4KB
+    uint64_t total_buf_size = 0;
+    for (size_t i = 0; i < output->cnt_; i++) {
+        total_buf_size += output->buffers_[i].iov_len;
+    }
+
+    // Check if user-provided buffer is large enough
+    if (total_buf_size < read_size) {
         if (cb) {
-            cb(cb_arg, static_cast<int>(KvError::kInternalError), 0);
+            cb(cb_arg, static_cast<int>(KvError::kInvalidArgument), read_size);
         }
         return;
     }
@@ -1382,19 +1387,27 @@ void Engine::GetAsync(uint64_t key, void* value_buf, uint32_t buf_len, KvGetCall
 
     pending_foreground_count_++;
 
-    // Submit async blob read with named completion handler
-    auto* read_ctx = new GetReadCompletionCtx{this, dma_buffer, value_buf, buf_len, cb, cb_arg};
-    SubmitBlobRead(file, offset, dma_buffer, read_size, [read_ctx](int status) {
-        read_ctx->engine->HandleGetReadCompletion(status, read_ctx);
-    });
-    return;
+    // Submit async blob read directly to user-provided buffer (zero-copy)
+    auto* read_ctx = new GetReadCompletionCtx{this, output, read_size, cb, cb_arg};
+
+    if (output->cnt_ == 1) {
+        // Single contiguous buffer: use standard read
+        SubmitBlobRead(file, offset, output->buffers_[0].iov_base, read_size,
+                       [read_ctx](int status) {
+                           read_ctx->engine->HandleGetReadCompletion(status, read_ctx);
+                       });
+    } else {
+        // Multiple buffers: use vectored read
+        SubmitBlobReadv(file, offset, *output, read_size, [read_ctx](int status) {
+            read_ctx->engine->HandleGetReadCompletion(status, read_ctx);
+        });
+    }
 }
 
 void Engine::HandleGetReadCompletion(int status, GetReadCompletionCtx* ctx) {
     pending_foreground_count_--;
 
     if (status != 0) {
-        DmaAllocator::Free(ctx->dma_buffer);
         if (ctx->cb) {
             ctx->cb(ctx->cb_arg, static_cast<int>(KvError::kIoError), 0);
         }
@@ -1402,10 +1415,15 @@ void Engine::HandleGetReadCompletion(int status, GetReadCompletionCtx* ctx) {
         return;
     }
 
-    // Parse entry header
-    auto* header = static_cast<EntryHeader*>(ctx->dma_buffer);
+    // Data layout in the first segment (data already in user-provided buffer):
+    // [0, 256):     Reserved for user (engine doesn't write here)
+    // [256, 512):   Entry metadata (EntryHeader + key + value_len + crc)
+    // [512, ...):   Actual value data (user will skip first 512 bytes)
+
+    // Parse entry header at offset 256 (kSegmentMetaOffset) from the first buffer
+    auto* header = reinterpret_cast<EntryHeader*>(
+            static_cast<char*>(ctx->output->buffers_[0].iov_base) + kSegmentMetaOffset);
     if (!header->is_valid()) {
-        DmaAllocator::Free(ctx->dma_buffer);
         if (ctx->cb) {
             ctx->cb(ctx->cb_arg, static_cast<int>(KvError::kCorruption), 0);
         }
@@ -1413,26 +1431,17 @@ void Engine::HandleGetReadCompletion(int status, GetReadCompletionCtx* ctx) {
         return;
     }
 
-    // Get value length
-    uint32_t value_len = *reinterpret_cast<uint32_t*>(static_cast<char*>(ctx->dma_buffer) +
-                                                      sizeof(EntryHeader) + sizeof(uint64_t));
+    // Get value length from metadata area
+    // Layout at offset 256: EntryHeader(16) + key(8) + value_len(4)
+    uint32_t value_len = *reinterpret_cast<uint32_t*>(
+            static_cast<char*>(ctx->output->buffers_[0].iov_base) + kSegmentMetaOffset +
+            sizeof(EntryHeader) + sizeof(uint64_t));
 
-    if (value_len > ctx->buf_len) {
-        DmaAllocator::Free(ctx->dma_buffer);
-        if (ctx->cb) {
-            ctx->cb(ctx->cb_arg, static_cast<int>(KvError::kValueTooLarge), value_len);
-        }
-        delete ctx;
-        return;
-    }
+    // Data is already in user-provided buffer (zero-copy)
+    // User is responsible for their own buffer lifecycle
 
-    // Copy value to user buffer
-    void* value_ptr = static_cast<char*>(ctx->dma_buffer) + sizeof(EntryHeader) + sizeof(uint64_t) +
-                      sizeof(uint32_t);
-    std::memcpy(ctx->value_buf, value_ptr, value_len);
-
-    DmaAllocator::Free(ctx->dma_buffer);
     if (ctx->cb) {
+        // Return actual value length (excluding the 512-byte header)
         ctx->cb(ctx->cb_arg, 0, value_len);
     }
     delete ctx;
@@ -2007,6 +2016,58 @@ void Engine::SubmitBlobRead(FileInfo* file, uint64_t offset, void* buffer, uint3
             file->blob, channel, buffer, offset_units, length_units,
             [](void* arg, int bserrno) {
                 auto* ctx = static_cast<ReadCtx*>(arg);
+                if (ctx->callback) {
+                    ctx->callback(bserrno);
+                }
+                delete ctx;
+            },
+            ctx);
+}
+
+void Engine::SubmitBlobReadv(FileInfo* file, uint64_t offset, const SegmentBuf& buf,
+                             uint32_t total_length, std::function<void(int status)> callback) {
+    if (!file || !file->blob || !file->blob_opened) {
+        if (callback) {
+            callback(-1);
+        }
+        return;
+    }
+
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized() || !env.GetBlobStore()) {
+        if (callback) {
+            callback(-1);
+        }
+        return;
+    }
+
+    auto* channel = io_submitter_->GetChannel();
+    if (!channel) {
+        if (callback) {
+            callback(-1);
+        }
+        return;
+    }
+
+    uint64_t io_unit_size = spdk_bs_get_io_unit_size(env.GetBlobStore());
+    uint64_t offset_units = offset / io_unit_size;
+    uint64_t length_units = total_length / io_unit_size;
+
+    // Completion context holds the callback and a copy of the iovec array
+    struct ReadvCtx {
+        std::function<void(int)> callback;
+        iovec iovs[16];
+    };
+    auto* ctx = new ReadvCtx();
+    ctx->callback = std::move(callback);
+    for (size_t i = 0; i < buf.cnt_; i++) {
+        ctx->iovs[i] = buf.buffers_[i];
+    }
+
+    spdk_blob_io_readv(
+            file->blob, channel, ctx->iovs, static_cast<int>(buf.cnt_), offset_units, length_units,
+            [](void* arg, int bserrno) {
+                auto* ctx = static_cast<ReadvCtx*>(arg);
                 if (ctx->callback) {
                     ctx->callback(bserrno);
                 }
@@ -2799,6 +2860,49 @@ void spdk_kv_put_async(spdk_kv_handle handle, uint64_t key, const void* value, u
     engine->PutBuffered(key, value, value_len, cb, cb_arg);
 }
 
+// C API wrapper context for GetAsync
+struct CApiGetAsyncCtx {
+    SegmentBuf output;
+    void* dma_buffer;       // DMA buffer allocated for reading
+    uint32_t dma_buf_size;  // Size of allocated DMA buffer
+    void* user_buf;
+    uint32_t user_buf_len;
+    spdk_kv_get_cb user_cb;
+    void* user_cb_arg;
+};
+
+static void CApiGetAsyncCallback(void* arg, int status, uint32_t actual_len) {
+    auto* ctx = static_cast<CApiGetAsyncCtx*>(arg);
+
+    if (status == 0) {
+        // Check if user buffer is large enough for actual value
+        if (actual_len > ctx->user_buf_len) {
+            // Free DMA buffer
+            DmaAllocator::Free(ctx->dma_buffer);
+            if (ctx->user_cb) {
+                ctx->user_cb(ctx->user_cb_arg, static_cast<int>(KvError::kValueTooLarge), actual_len);
+            }
+            delete ctx;
+            return;
+        }
+
+        // Copy value data (skip first 512 bytes header) to user buffer
+        // Data layout: [0-512) header, [512-...) actual value
+        char* src = static_cast<char*>(ctx->dma_buffer) + kSegmentDataOffset;
+        std::memcpy(ctx->user_buf, src, actual_len);
+    }
+
+    // Free DMA buffer
+    if (ctx->dma_buffer) {
+        DmaAllocator::Free(ctx->dma_buffer);
+    }
+
+    if (ctx->user_cb) {
+        ctx->user_cb(ctx->user_cb_arg, status, actual_len);
+    }
+    delete ctx;
+}
+
 void spdk_kv_get_async(spdk_kv_handle handle, uint64_t key, void* value_buf, uint32_t buf_len,
                        spdk_kv_get_cb cb, void* cb_arg) {
     if (!handle) {
@@ -2807,8 +2911,36 @@ void spdk_kv_get_async(spdk_kv_handle handle, uint64_t key, void* value_buf, uin
         }
         return;
     }
+
+    // Allocate DMA buffer: user buffer size + 512 byte header, aligned up to 4KB
+    // Use maximum of 16 pages (64KB) as upper bound for SegmentBuf capacity
+    uint32_t required_size = AlignUp(static_cast<uint64_t>(buf_len) + kSegmentDataOffset, kPageSize);
+    uint32_t max_size = 16 * kPageSize;  // SegmentBuf can hold at most 16 pages
+    uint32_t alloc_size = std::min(required_size, max_size);
+
+    void* dma_buffer = DmaAllocator::Alloc(alloc_size, kPageSize);
+    if (!dma_buffer) {
+        if (cb) {
+            cb(cb_arg, static_cast<int>(KvError::kInternalError), 0);
+        }
+        return;
+    }
+
+    auto* ctx = new CApiGetAsyncCtx{};
+    ctx->dma_buffer = dma_buffer;
+    ctx->dma_buf_size = alloc_size;
+    ctx->user_buf = value_buf;
+    ctx->user_buf_len = buf_len;
+    ctx->user_cb = cb;
+    ctx->user_cb_arg = cb_arg;
+
+    // Setup SegmentBuf with single contiguous DMA buffer
+    ctx->output.cnt_ = 1;
+    ctx->output.buffers_[0].iov_base = dma_buffer;
+    ctx->output.buffers_[0].iov_len = alloc_size;
+
     auto* engine = static_cast<Engine*>(handle);
-    engine->GetAsync(key, value_buf, buf_len, cb, cb_arg);
+    engine->GetAsync(key, &ctx->output, CApiGetAsyncCallback, ctx);
 }
 
 void spdk_kv_del_async(spdk_kv_handle handle, uint64_t key, spdk_kv_cb cb, void* cb_arg) {
