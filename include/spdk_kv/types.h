@@ -33,6 +33,13 @@ constexpr uint64_t kSuperblockPrimaryOffset = 0;
 constexpr uint64_t kSuperblockBackupOffset = 4 * 1024 * 1024;  // 4MB
 constexpr uint64_t kSuperblockBlobSize = 8 * 1024 * 1024;      // 8MB
 
+// AllocLog constants
+constexpr uint32_t kAllocLogMagic = 0x414C4F47;                 // "ALOG"
+constexpr uint64_t kAllocLogAreaOffset = 1ULL * 1024 * 1024;    // 1MB offset in superblock blob
+constexpr uint32_t kAllocLogCapacity = 64;                       // Max entries in rolling buffer
+constexpr uint32_t kAllocLogNearFullThreshold = 48;              // Trigger checkpoint at 75% full
+constexpr uint8_t kAllocLogOpAlloc = 1;                          // Allocation operation
+
 // MemIndex configuration
 constexpr size_t kMemIndexSegmentSize = 1ULL * 1024 * 1024 * 1024;  // 1GB
 constexpr size_t kMemIndexSegmentCount = 80;                        // 80 segments per area

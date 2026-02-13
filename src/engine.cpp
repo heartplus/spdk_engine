@@ -22,6 +22,7 @@ Engine::Engine()
           compaction_enabled_(true),
           pending_foreground_count_(0),
           allocating_new_file_(false),
+          pending_checkpoint_for_alloc_(false),
           pending_blob_ops_(0),
           superblock_blob_(nullptr),
           superblock_blob_id_(SPDK_BLOBID_INVALID),
@@ -125,6 +126,13 @@ KvError Engine::Close() {
     superblock_.total_garbage_bytes = total_garbage_bytes_;
     superblock_.total_entries = mem_index_ ? mem_index_->Size() : 0;
 
+    // Persist AllocLog state
+    if (alloc_log_manager_) {
+        superblock_.alloc_log_head = alloc_log_manager_->GetHead();
+        superblock_.alloc_log_tail = alloc_log_manager_->GetTail();
+        superblock_.alloc_log_sequence = alloc_log_manager_->GetSequence();
+    }
+
     // Update file mappings with current state
     for (const auto& file : files_) {
         UpdateSuperblockFileMapping(file.get());
@@ -175,6 +183,7 @@ KvError Engine::Close() {
     io_submitter_.reset();
     checkpoint_manager_.reset();
     compaction_scheduler_.reset();
+    alloc_log_manager_.reset();
 
     state_ = EngineState::kClosed;
     return KvError::kSuccess;
@@ -226,7 +235,17 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
     superblock_.alignment_unit = kPageSize;
     superblock_.file_count = 0;
 
-    // Create first data file (this calls UpdateSuperblockFileMapping internally)
+    // Create superblock blob first (needed for AllocLog writes)
+    KvError sb_err = CreateSuperblockBlob();
+    if (sb_err != KvError::kSuccess) {
+        return sb_err;
+    }
+
+    // Initialize AllocLog manager
+    InitAllocLogManager();
+
+    // Create first data file (this calls UpdateSuperblockFileMapping internally,
+    // and now also writes AllocLog entry before DataFileHeader)
     FileInfo* file = AllocateNewFile();
     if (!file) {
         return KvError::kInternalError;
@@ -234,10 +253,11 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
     active_file_id_ = file->file_id;
     superblock_.active_file_id = active_file_id_;
 
-    // Create superblock blob and persist to NVMe
-    KvError sb_err = CreateSuperblockBlob();
-    if (sb_err != KvError::kSuccess) {
-        return sb_err;
+    // Persist superblock (includes AllocLog state)
+    if (alloc_log_manager_) {
+        superblock_.alloc_log_head = alloc_log_manager_->GetHead();
+        superblock_.alloc_log_tail = alloc_log_manager_->GetTail();
+        superblock_.alloc_log_sequence = alloc_log_manager_->GetSequence();
     }
 
     sb_err = WriteSuperblock();
@@ -271,6 +291,14 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
                     UpdateSuperblockFileMapping(f.get());
                 }
 
+                // Reclaim AllocLog entries (all allocations are now in file_mappings)
+                if (alloc_log_manager_) {
+                    alloc_log_manager_->Reclaim();
+                    superblock_.alloc_log_head = alloc_log_manager_->GetHead();
+                    superblock_.alloc_log_tail = alloc_log_manager_->GetTail();
+                    superblock_.alloc_log_sequence = alloc_log_manager_->GetSequence();
+                }
+
                 KvError err = WriteSuperblock();
                 if (on_complete) {
                     on_complete(err == KvError::kSuccess ? 0 : -1);
@@ -296,6 +324,12 @@ KvError Engine::LoadExisting(const OpenOpts& opts) {
     config_.max_capacity = superblock_.total_capacity;
     config_.data_file_size = superblock_.data_file_size;
     // Keep other config values at defaults or load from persistent storage if available
+
+    // Step 3.5: Initialize AllocLog manager (needs superblock_blob_ from LoadSuperblock)
+    InitAllocLogManager();
+
+    // Step 3.6: Load and process AllocLog entries for recovery
+    ProcessAllocLogRecovery();
 
     // Step 4: Initialize memory index
     mem_index_ = std::make_unique<MemIndex>(config_.max_entries, config_.index_load_factor);
@@ -324,6 +358,9 @@ KvError Engine::LoadExisting(const OpenOpts& opts) {
     if (err != KvError::kSuccess) {
         return err;
     }
+
+    // Step 7.5: Release dangling blobs (allocated but not tracked in file_mappings or AllocLog)
+    ReleaseDanglingBlobs();
 
     // Step 8: Initialize checkpoint manager
     checkpoint_manager_ =
@@ -358,6 +395,14 @@ KvError Engine::LoadExisting(const OpenOpts& opts) {
                 // Update file mappings
                 for (const auto& file : files_) {
                     UpdateSuperblockFileMapping(file.get());
+                }
+
+                // Reclaim AllocLog entries (all allocations are now in file_mappings)
+                if (alloc_log_manager_) {
+                    alloc_log_manager_->Reclaim();
+                    superblock_.alloc_log_head = alloc_log_manager_->GetHead();
+                    superblock_.alloc_log_tail = alloc_log_manager_->GetTail();
+                    superblock_.alloc_log_sequence = alloc_log_manager_->GetSequence();
                 }
 
                 // Persist superblock
@@ -678,6 +723,16 @@ KvError Engine::Recover() {
 }
 
 FileInfo* Engine::AllocateNewFile() {
+    // Check AllocLog capacity: if near-full, run checkpoint synchronously to reclaim
+    if (alloc_log_manager_ && alloc_log_manager_->IsNearFull()) {
+        bool cp_done = false;
+        StartCheckpoint(
+                [](void* arg, int) { *static_cast<bool*>(arg) = true; }, &cp_done);
+        while (!cp_done) {
+            SpdkEnv::Instance().Poll();
+        }
+    }
+
     auto file = std::make_unique<FileInfo>();
     file->file_id = next_file_id_++;
     file->blob_id = 0;  // Will be assigned by SPDK
@@ -725,6 +780,14 @@ FileInfo* Engine::AllocateNewFile() {
 
 void Engine::AllocateNewFileAsync() {
     allocating_new_file_ = true;
+
+    // Check AllocLog capacity: if near-full, checkpoint first, then resume allocation
+    if (alloc_log_manager_ && alloc_log_manager_->IsNearFull() &&
+        !pending_checkpoint_for_alloc_) {
+        pending_checkpoint_for_alloc_ = true;
+        StartCheckpoint(OnCheckpointForAllocComplete, this);
+        return;
+    }
 
     auto file = std::make_unique<FileInfo>();
     file->file_id = next_file_id_++;
@@ -1770,8 +1833,26 @@ void Engine::AllocateBlobForFile(FileInfo* file, std::function<void(bool success
 
         file->blob_id = blob_id;
 
-        // Open the blob after allocation
-        OpenBlobForFile(file, callback);
+        // Write AllocLog entry BEFORE opening blob / writing DataFileHeader.
+        // This ensures crash consistency: if we crash after AllocLog but before
+        // DataFileHeader, recovery can identify this blob via AllocLog.
+        if (alloc_log_manager_ && alloc_log_manager_->IsInitialized()) {
+            alloc_log_manager_->WriteEntry(
+                    blob_id, file->file_id, config_.data_file_size,
+                    [this, file, callback](int status) {
+                        if (status != 0) {
+                            if (callback) {
+                                callback(false);
+                            }
+                            return;
+                        }
+                        // AllocLog persisted, now open blob and write DataFileHeader
+                        OpenBlobForFile(file, callback);
+                    });
+        } else {
+            // No AllocLog manager: legacy path
+            OpenBlobForFile(file, callback);
+        }
     });
 }
 
@@ -2769,6 +2850,283 @@ void Engine::UpdateIndexOnWriteComplete(uint64_t key, const MemIndexEntry& entry
         // User write: use sequence comparison (Upsert handles this internally)
         mem_index_->Upsert(key, entry);
     }
+}
+
+// =========================================================================
+// AllocLog Integration
+// =========================================================================
+
+void Engine::InitAllocLogManager() {
+    alloc_log_manager_ = std::make_unique<AllocLogManager>();
+
+    auto& env = SpdkEnv::Instance();
+    spdk_io_channel* channel = env.IsInitialized() ? env.GetIoChannel() : nullptr;
+    spdk_blob_store* bs = env.IsInitialized() ? env.GetBlobStore() : nullptr;
+
+    alloc_log_manager_->Initialize(superblock_blob_, channel, bs, superblock_.alloc_log_head,
+                                   superblock_.alloc_log_tail, superblock_.alloc_log_sequence);
+}
+
+void Engine::ProcessAllocLogRecovery() {
+    if (!alloc_log_manager_ || !alloc_log_manager_->IsInitialized()) {
+        return;
+    }
+
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized()) {
+        return;
+    }
+
+    // Load AllocLog entries written after the last checkpoint
+    bool load_done = false;
+    std::vector<AllocLogEntry> alloc_entries;
+
+    alloc_log_manager_->LoadEntries(
+            superblock_.alloc_log_sequence,
+            [&load_done, &alloc_entries](int status, const std::vector<AllocLogEntry>& entries) {
+                if (status == 0) {
+                    alloc_entries = entries;
+                }
+                load_done = true;
+            });
+
+    while (!load_done) {
+        env.Poll();
+    }
+
+    // For each AllocLog entry: open the blob, validate DataFileHeader.
+    // If valid, add to superblock file_mappings (will be picked up by RebuildFileInfo).
+    // If invalid (incomplete allocation), delete the blob.
+    for (const auto& entry : alloc_entries) {
+        // Open the blob
+        struct OpenCtx {
+            spdk_blob* blob;
+            int status;
+            bool done;
+        };
+        OpenCtx open_ctx{nullptr, 0, false};
+
+        spdk_bs_open_blob(
+                env.GetBlobStore(), entry.blob_id,
+                [](void* arg, struct spdk_blob* blob, int bserrno) {
+                    auto* ctx = static_cast<OpenCtx*>(arg);
+                    ctx->blob = blob;
+                    ctx->status = bserrno;
+                    ctx->done = true;
+                },
+                &open_ctx);
+
+        while (!open_ctx.done) {
+            env.Poll();
+        }
+
+        if (open_ctx.status != 0 || !open_ctx.blob) {
+            // Blob doesn't exist or can't be opened: skip
+            continue;
+        }
+
+        // Read the DataFileHeader (first 4KB)
+        void* header_buf = DmaAllocator::AllocZeroed(kPageSize, kPageSize);
+        if (!header_buf) {
+            env.CloseBlob(open_ctx.blob, [](int) {});
+            continue;
+        }
+
+        auto* channel = env.GetIoChannel();
+        uint64_t io_unit_size = spdk_bs_get_io_unit_size(env.GetBlobStore());
+        uint64_t length_units = kPageSize / io_unit_size;
+
+        struct ReadCtx {
+            int status;
+            bool done;
+        };
+        ReadCtx read_ctx{0, false};
+
+        spdk_blob_io_read(
+                open_ctx.blob, channel, header_buf, 0, length_units,
+                [](void* arg, int bserrno) {
+                    auto* ctx = static_cast<ReadCtx*>(arg);
+                    ctx->status = bserrno;
+                    ctx->done = true;
+                },
+                &read_ctx);
+
+        while (!read_ctx.done) {
+            env.Poll();
+        }
+
+        bool valid_header = false;
+        if (read_ctx.status == 0) {
+            auto* header = static_cast<DataFileHeader*>(header_buf);
+            if (header->magic == kDataFileHeaderMagic) {
+                uint32_t stored = header->checksum;
+                uint32_t computed =
+                        Crc32::Calculate(header, sizeof(DataFileHeader) - sizeof(uint32_t));
+                if (stored == computed && header->file_id == entry.file_id) {
+                    valid_header = true;
+                }
+            }
+        }
+
+        DmaAllocator::Free(header_buf);
+
+        if (valid_header) {
+            // Valid allocation: add to superblock file_mappings for RebuildFileInfo
+            if (superblock_.file_count < kMaxFileCount) {
+                auto& mapping = superblock_.file_mappings[superblock_.file_count];
+                mapping.file_id = entry.file_id;
+                mapping.blob_id = entry.blob_id;
+                mapping.size = 0;
+                mapping.write_offset = sizeof(DataFileHeader);
+                mapping.state = FileState::kActive;
+                superblock_.file_count++;
+
+                if (entry.file_id >= next_file_id_) {
+                    next_file_id_ = entry.file_id + 1;
+                }
+            }
+
+            // Close blob (RebuildFileInfo will reopen it)
+            struct CloseCtx {
+                bool done;
+            };
+            CloseCtx close_ctx{false};
+            env.CloseBlob(open_ctx.blob, [&close_ctx](int) { close_ctx.done = true; });
+            while (!close_ctx.done) {
+                env.Poll();
+            }
+        } else {
+            // Invalid/incomplete allocation: close and delete the blob
+            struct CloseCtx {
+                bool done;
+            };
+            CloseCtx close_ctx{false};
+            env.CloseBlob(open_ctx.blob, [&close_ctx](int) { close_ctx.done = true; });
+            while (!close_ctx.done) {
+                env.Poll();
+            }
+
+            struct DeleteCtx {
+                bool done;
+            };
+            DeleteCtx delete_ctx{false};
+            env.DeleteBlob(entry.blob_id, [&delete_ctx](int) { delete_ctx.done = true; });
+            while (!delete_ctx.done) {
+                env.Poll();
+            }
+        }
+    }
+}
+
+void Engine::ReleaseDanglingBlobs() {
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized() || !env.GetBlobStore()) {
+        return;
+    }
+
+    // Build the set of known blob IDs
+    std::unordered_map<uint64_t, bool> known_blobs;
+
+    // Superblock blob
+    if (superblock_blob_id_ != SPDK_BLOBID_INVALID) {
+        known_blobs[superblock_blob_id_] = true;
+    }
+
+    // MemIndex blobs
+    if (superblock_.mem_index_blob_a != 0) {
+        known_blobs[superblock_.mem_index_blob_a] = true;
+    }
+    if (superblock_.mem_index_blob_b != 0) {
+        known_blobs[superblock_.mem_index_blob_b] = true;
+    }
+
+    // All file mapping blobs
+    for (uint16_t i = 0; i < superblock_.file_count; i++) {
+        known_blobs[superblock_.file_mappings[i].blob_id] = true;
+    }
+
+    // Iterate all blobs in blobstore and collect dangling ones.
+    // spdk_bs_iter_first/next: callback receives each blob in turn.
+    // Must call iter_next from within callback to continue.
+    std::vector<spdk_blob_id> dangling_blobs;
+
+    struct IterState {
+        spdk_blob_store* bs;
+        std::unordered_map<uint64_t, bool>* known;
+        std::vector<spdk_blob_id>* dangling;
+        bool done;
+    };
+    IterState iter_state{env.GetBlobStore(), &known_blobs, &dangling_blobs, false};
+
+    // Forward-declare the callback as a plain function for self-referential iter_next
+    struct BlobIterHelper {
+        static void Callback(void* arg, struct spdk_blob* blob, int bserrno) {
+            auto* state = static_cast<IterState*>(arg);
+
+            if (bserrno == -ENOENT || !blob) {
+                state->done = true;
+                return;
+            }
+
+            if (bserrno != 0) {
+                state->done = true;
+                return;
+            }
+
+            spdk_blob_id blob_id = spdk_blob_get_id(blob);
+            if (state->known->find(blob_id) == state->known->end()) {
+                state->dangling->push_back(blob_id);
+            }
+
+            // Continue to next blob
+            spdk_bs_iter_next(state->bs, blob, BlobIterHelper::Callback, arg);
+        }
+    };
+
+    spdk_bs_iter_first(env.GetBlobStore(), BlobIterHelper::Callback, &iter_state);
+
+    while (!iter_state.done) {
+        env.Poll();
+    }
+
+    // Release each dangling blob
+    for (auto blob_id : dangling_blobs) {
+        struct DeleteCtx {
+            bool done;
+        };
+        DeleteCtx del_ctx{false};
+        env.DeleteBlob(blob_id, [&del_ctx](int) { del_ctx.done = true; });
+        while (!del_ctx.done) {
+            env.Poll();
+        }
+    }
+}
+
+void Engine::OnCheckpointForAllocComplete(void* arg, int status) {
+    auto* engine = static_cast<Engine*>(arg);
+    engine->ResumeAllocationAfterCheckpoint(status);
+}
+
+void Engine::ResumeAllocationAfterCheckpoint(int status) {
+    pending_checkpoint_for_alloc_ = false;
+
+    if (status != 0) {
+        // Checkpoint failed: fail all pending writes and reset allocation state
+        allocating_new_file_ = false;
+        for (auto& req : pending_write_queue_) {
+            if (!req.is_segment_write) {
+                DmaAllocator::Free(req.dma_buffer);
+            }
+            if (req.cb) {
+                req.cb(req.cb_arg, static_cast<int>(KvError::kInternalError));
+            }
+        }
+        pending_write_queue_.clear();
+        return;
+    }
+
+    // AllocLog reclaimed by checkpoint, now proceed with actual file allocation
+    AllocateNewFileAsync();
 }
 
 // C API implementation

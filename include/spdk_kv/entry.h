@@ -83,6 +83,26 @@ struct SegmentHeader {
 
 static_assert(sizeof(SegmentHeader) == 64, "SegmentHeader must be 64 bytes");
 
+// AllocLog entry structure (64 bytes)
+// Tracks blob allocations between checkpoints for crash recovery
+struct AllocLogEntry {
+    uint32_t magic;        // kAllocLogMagic
+    uint32_t sequence;     // Monotonic sequence number
+    uint64_t blob_id;      // SPDK blob ID
+    uint16_t file_id;      // Custom file ID
+    uint8_t op;            // Operation type (kAllocLogOpAlloc)
+    uint8_t reserved1;
+    uint32_t reserved2;
+    uint64_t create_time;  // Creation timestamp
+    uint64_t file_size;    // Expected file size
+    uint8_t padding[20];   // Pad to 60 bytes before checksum
+    uint32_t checksum;     // CRC32 of first 60 bytes
+
+    bool is_valid_magic() const { return magic == kAllocLogMagic; }
+};
+
+static_assert(sizeof(AllocLogEntry) == 64, "AllocLogEntry must be 64 bytes");
+
 // File mapping structure
 struct FileMapping {
     uint16_t file_id;       // Custom file ID (10-bit effective)
@@ -138,6 +158,11 @@ struct Superblock {
     uint64_t total_entries;        // Total entry count
     uint64_t total_data_bytes;     // Total data bytes
     uint64_t total_garbage_bytes;  // Total garbage bytes
+
+    // AllocLog tracking (rolling buffer in superblock blob at kAllocLogAreaOffset)
+    uint32_t alloc_log_head;      // Head index (oldest valid entry)
+    uint32_t alloc_log_tail;      // Tail index (next write position)
+    uint32_t alloc_log_sequence;  // Last allocated sequence number
 
     uint32_t checksum;  // Checksum
 

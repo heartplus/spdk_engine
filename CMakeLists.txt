@@ -32,6 +32,7 @@ set(SPDK_KV_SOURCES
     src/compaction.cpp
     src/spdk_env.cpp
     src/io_submitter.cpp
+    src/alloc_log.cpp
 )
 
 # Main library

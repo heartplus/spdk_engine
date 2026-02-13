@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "spdk_kv/alloc_log.h"
 #include "spdk_kv/append_buffer.h"
 #include "spdk_kv/callback_task_queue.h"
 #include "spdk_kv/checkpoint.h"
@@ -262,6 +263,13 @@ private:
     void ProcessPendingWriteQueue();
     void SubmitQueuedWrite(PendingWriteRequest& req, FileInfo* file);
 
+    // AllocLog integration
+    void InitAllocLogManager();
+    void ProcessAllocLogRecovery();
+    void ReleaseDanglingBlobs();
+    static void OnCheckpointForAllocComplete(void* arg, int status);
+    void ResumeAllocationAfterCheckpoint(int status);
+
     // RDMA slot management
     uint32_t AllocateSlotId();
     uint64_t GetBufferRkey(void* buffer_addr);
@@ -316,7 +324,11 @@ private:
 
     // Async file allocation state
     bool allocating_new_file_;
+    bool pending_checkpoint_for_alloc_;
     std::vector<PendingWriteRequest> pending_write_queue_;
+
+    // AllocLog manager (tracks blob allocations between checkpoints)
+    std::unique_ptr<AllocLogManager> alloc_log_manager_;
 
     // Pending blob operations count
     size_t pending_blob_ops_;
