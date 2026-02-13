@@ -67,6 +67,14 @@ public:
     bool IsInitialized() const { return initialized_; }
 
 private:
+    // Extracted static callback for LoadEntries async read
+    struct LoadEntriesReadCtx {
+        AllocLogManager* mgr;
+        uint32_t checkpoint_seq;
+        std::function<void(int, const std::vector<AllocLogEntry>&)> callback;
+    };
+    static void OnAllocLogPageRead(void* arg, int bserrno);
+
     // SPDK resources
     spdk_blob* superblock_blob_;
     spdk_io_channel* channel_;

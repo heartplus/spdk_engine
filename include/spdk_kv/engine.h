@@ -263,6 +263,40 @@ private:
     void ProcessPendingWriteQueue();
     void SubmitQueuedWrite(PendingWriteRequest& req, FileInfo* file);
 
+    // Superblock update callback for checkpoint atomicity
+    void OnSuperblockUpdate(uint32_t checkpoint_seq, const ActiveBufferPos* positions,
+                            uint8_t count, std::function<void(int)> on_complete);
+
+    // Queued write completion handler
+    struct QueuedWriteCompletionCtx {
+        Engine* engine;
+        uint64_t key;
+        MemIndexEntry entry;
+        bool is_delete;
+        uint64_t old_garbage_size;
+        KvCallback cb;
+        void* cb_arg;
+    };
+    void OnQueuedWriteComplete(int status, QueuedWriteCompletionCtx* ctx);
+
+    // PutAsync write completion handler
+    struct PutAsyncWriteCompletionCtx {
+        Engine* engine;
+        uint64_t key;
+        MemIndexEntry entry;
+        KvCallback cb;
+        void* cb_arg;
+    };
+    void OnPutAsyncWriteComplete(int status, PutAsyncWriteCompletionCtx* ctx);
+
+    // CompactionRemoveFile blob close handler
+    void OnCompactionBlobClosed(bool close_ok, uint16_t file_id, FileInfo* file,
+                                std::function<void(bool)> callback);
+
+    // AllocateBlobForFile blob allocated handler
+    void OnBlobAllocated(uint64_t blob_id, FileInfo* file,
+                         std::function<void(bool)> callback);
+
     // AllocLog integration
     void InitAllocLogManager();
     void ProcessAllocLogRecovery();

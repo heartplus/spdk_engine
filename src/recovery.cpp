@@ -112,83 +112,11 @@ void IndexLoader::LoadSuperblockFromBlob() {
     uint64_t io_unit_size = spdk_bs_get_io_unit_size(blobstore_);
     uint64_t length_units = sb_aligned_size / io_unit_size;
 
-    struct ReadCtx {
-        IndexLoader* loader;
-        void* buf;
-        size_t size;
-        bool is_backup;
-    };
-    auto* ctx = new ReadCtx{this, read_buf, sb_aligned_size, false};
+    auto* ctx = new SuperblockReadCtx{this, read_buf, sb_aligned_size, false};
 
-    spdk_blob_io_read(
-            superblock_blob_, io_channel_, read_buf, kSuperblockPrimaryOffset / io_unit_size,
-            length_units,
-            [](void* arg, int bserrno) {
-                auto* ctx = static_cast<ReadCtx*>(arg);
-                auto* self = ctx->loader;
-
-                if (bserrno == 0) {
-                    auto* sb = static_cast<Superblock*>(ctx->buf);
-                    if (sb->magic == kSuperblockMagic) {
-                        uint32_t stored_checksum = sb->checksum;
-                        uint32_t computed =
-                                Crc32::Calculate(sb, sizeof(Superblock) - sizeof(uint32_t));
-                        if (stored_checksum == computed) {
-                            std::memcpy(&self->superblock_, sb, sizeof(Superblock));
-                            DmaAllocator::Free(ctx->buf);
-                            delete ctx;
-                            self->TransitionTo(State::kLoadingMemIndexA);
-                            self->LoadMemIndexArea(0);
-                            return;
-                        }
-                    }
-                }
-
-                // Primary failed, try backup
-                if (!ctx->is_backup) {
-                    ctx->is_backup = true;
-                    uint64_t io_unit_size = spdk_bs_get_io_unit_size(self->blobstore_);
-                    uint64_t length_units = ctx->size / io_unit_size;
-
-                    self->TransitionTo(State::kLoadingSuperblockBackup);
-                    spdk_blob_io_read(
-                            self->superblock_blob_, self->io_channel_, ctx->buf,
-                            kSuperblockBackupOffset / io_unit_size, length_units,
-                            [](void* arg, int bserrno) {
-                                auto* ctx = static_cast<ReadCtx*>(arg);
-                                auto* self = ctx->loader;
-
-                                if (bserrno == 0) {
-                                    auto* sb = static_cast<Superblock*>(ctx->buf);
-                                    if (sb->magic == kSuperblockMagic) {
-                                        uint32_t stored = sb->checksum;
-                                        uint32_t computed = Crc32::Calculate(
-                                                sb, sizeof(Superblock) - sizeof(uint32_t));
-                                        if (stored == computed) {
-                                            std::memcpy(&self->superblock_, sb,
-                                                        sizeof(Superblock));
-                                            DmaAllocator::Free(ctx->buf);
-                                            delete ctx;
-                                            self->TransitionTo(State::kLoadingMemIndexA);
-                                            self->LoadMemIndexArea(0);
-                                            return;
-                                        }
-                                    }
-                                }
-
-                                // Both superblocks invalid
-                                DmaAllocator::Free(ctx->buf);
-                                delete ctx;
-                                self->last_error_ = KvError::kCorruption;
-                                self->TransitionTo(State::kError);
-                                if (self->callback_) {
-                                    self->callback_(self->last_error_);
-                                }
-                            },
-                            ctx);
-                }
-            },
-            ctx);
+    spdk_blob_io_read(superblock_blob_, io_channel_, read_buf,
+                      kSuperblockPrimaryOffset / io_unit_size, length_units,
+                      OnSuperblockReadComplete, ctx);
 }
 
 void IndexLoader::LoadSuperblockBackup() {
@@ -471,42 +399,10 @@ void IndexLoader::LoadAsMemoryDumpFromBlob(int area) {
         void* target_addr =
                 reinterpret_cast<char*>(mem_index_->Entries()) + seg * segment_size;
 
-        struct SegLoadCtx {
-            IndexLoader* loader;
-        };
         auto* ctx = new SegLoadCtx{this};
 
-        spdk_blob_io_read(
-                blob, io_channel_, target_addr, offset_units, length_units,
-                [](void* arg, int bserrno) {
-                    auto* ctx = static_cast<SegLoadCtx*>(arg);
-                    auto* self = ctx->loader;
-                    delete ctx;
-
-                    if (bserrno != 0) {
-                        self->has_load_error_ = true;
-                    }
-
-                    if (--self->pending_segment_loads_ == 0) {
-                        if (self->has_load_error_) {
-                            // Fall back to upsert from buffer
-                            self->LoadByUpsertFromBuffer();
-                        } else {
-                            // Rebuild PSL array (not persisted)
-                            self->RebuildPslArray();
-
-                            // Restore global sequence
-                            auto* hdr = reinterpret_cast<SerializedMemIndexHeader*>(
-                                    self->mem_index_buffer_.data());
-                            self->mem_index_->SetGlobalSequence(hdr->global_sequence);
-                        }
-
-                        // Continue to incremental rebuild
-                        self->TransitionTo(State::kRebuildingIncremental);
-                        self->StartIncrementalRebuild();
-                    }
-                },
-                ctx);
+        spdk_blob_io_read(blob, io_channel_, target_addr, offset_units, length_units,
+                          OnDirectSegmentLoaded, ctx);
     }
 }
 
@@ -702,48 +598,10 @@ void IndexLoader::ScanBlobChunk() {
     uint64_t offset_units = current_scan_offset_ / io_unit_size;
     uint64_t length_units = aligned_read / io_unit_size;
 
-    struct ScanCtx {
-        IndexLoader* loader;
-        void* dma_buf;
-        size_t read_size;
-    };
     auto* ctx = new ScanCtx{this, dma_buf, read_size};
 
-    spdk_blob_io_read(
-            blob, io_channel_, dma_buf, offset_units, length_units,
-            [](void* arg, int bserrno) {
-                auto* ctx = static_cast<ScanCtx*>(arg);
-                auto* self = ctx->loader;
-
-                if (bserrno != 0) {
-                    // Read error, skip remaining of this file
-                    DmaAllocator::Free(ctx->dma_buf);
-                    delete ctx;
-                    self->current_scan_idx_++;
-                    self->ScanNextFileBlob();
-                    return;
-                }
-
-                // Parse entries from the read chunk
-                const auto& range = self->scan_ranges_[self->current_scan_idx_];
-                size_t entries_found = self->ParseAndRebuildEntries(
-                        ctx->dma_buf, ctx->read_size, range.file_id, self->current_scan_offset_);
-
-                DmaAllocator::Free(ctx->dma_buf);
-                size_t read_size = ctx->read_size;
-                delete ctx;
-
-                if (entries_found == 0) {
-                    // No valid entries found, skip to next file
-                    self->current_scan_idx_++;
-                    self->ScanNextFileBlob();
-                } else {
-                    // Continue scanning this file
-                    self->current_scan_offset_ += read_size;
-                    self->ScanBlobChunk();
-                }
-            },
-            ctx);
+    spdk_blob_io_read(blob, io_channel_, dma_buf, offset_units, length_units,
+                      OnScanChunkRead, ctx);
 }
 
 // =========================================================================
@@ -870,6 +728,137 @@ bool IndexLoader::ValidateSuperblock(const Superblock& sb) {
 bool IndexLoader::ValidateChecksum(const void* data, size_t size, uint32_t expected) {
     uint32_t computed = Crc32::Calculate(data, size);
     return computed == expected;
+}
+
+// =========================================================================
+// Extracted static callbacks (from long lambdas)
+// =========================================================================
+
+void IndexLoader::OnSuperblockReadComplete(void* arg, int bserrno) {
+    auto* ctx = static_cast<SuperblockReadCtx*>(arg);
+    auto* self = ctx->loader;
+
+    if (bserrno == 0) {
+        auto* sb = static_cast<Superblock*>(ctx->buf);
+        if (sb->magic == kSuperblockMagic) {
+            uint32_t stored_checksum = sb->checksum;
+            uint32_t computed =
+                    Crc32::Calculate(sb, sizeof(Superblock) - sizeof(uint32_t));
+            if (stored_checksum == computed) {
+                std::memcpy(&self->superblock_, sb, sizeof(Superblock));
+                DmaAllocator::Free(ctx->buf);
+                delete ctx;
+                self->TransitionTo(State::kLoadingMemIndexA);
+                self->LoadMemIndexArea(0);
+                return;
+            }
+        }
+    }
+
+    // Primary failed, try backup
+    if (!ctx->is_backup) {
+        ctx->is_backup = true;
+        uint64_t io_unit_size = spdk_bs_get_io_unit_size(self->blobstore_);
+        uint64_t length_units = ctx->size / io_unit_size;
+
+        self->TransitionTo(State::kLoadingSuperblockBackup);
+        spdk_blob_io_read(self->superblock_blob_, self->io_channel_, ctx->buf,
+                          kSuperblockBackupOffset / io_unit_size, length_units,
+                          OnSuperblockBackupReadComplete, ctx);
+    }
+}
+
+void IndexLoader::OnSuperblockBackupReadComplete(void* arg, int bserrno) {
+    auto* ctx = static_cast<SuperblockReadCtx*>(arg);
+    auto* self = ctx->loader;
+
+    if (bserrno == 0) {
+        auto* sb = static_cast<Superblock*>(ctx->buf);
+        if (sb->magic == kSuperblockMagic) {
+            uint32_t stored = sb->checksum;
+            uint32_t computed =
+                    Crc32::Calculate(sb, sizeof(Superblock) - sizeof(uint32_t));
+            if (stored == computed) {
+                std::memcpy(&self->superblock_, sb, sizeof(Superblock));
+                DmaAllocator::Free(ctx->buf);
+                delete ctx;
+                self->TransitionTo(State::kLoadingMemIndexA);
+                self->LoadMemIndexArea(0);
+                return;
+            }
+        }
+    }
+
+    // Both superblocks invalid
+    DmaAllocator::Free(ctx->buf);
+    delete ctx;
+    self->last_error_ = KvError::kCorruption;
+    self->TransitionTo(State::kError);
+    if (self->callback_) {
+        self->callback_(self->last_error_);
+    }
+}
+
+void IndexLoader::OnDirectSegmentLoaded(void* arg, int bserrno) {
+    auto* ctx = static_cast<SegLoadCtx*>(arg);
+    auto* self = ctx->loader;
+    delete ctx;
+
+    if (bserrno != 0) {
+        self->has_load_error_ = true;
+    }
+
+    if (--self->pending_segment_loads_ == 0) {
+        if (self->has_load_error_) {
+            // Fall back to upsert from buffer
+            self->LoadByUpsertFromBuffer();
+        } else {
+            // Rebuild PSL array (not persisted)
+            self->RebuildPslArray();
+
+            // Restore global sequence
+            auto* hdr = reinterpret_cast<SerializedMemIndexHeader*>(
+                    self->mem_index_buffer_.data());
+            self->mem_index_->SetGlobalSequence(hdr->global_sequence);
+        }
+
+        // Continue to incremental rebuild
+        self->TransitionTo(State::kRebuildingIncremental);
+        self->StartIncrementalRebuild();
+    }
+}
+
+void IndexLoader::OnScanChunkRead(void* arg, int bserrno) {
+    auto* ctx = static_cast<ScanCtx*>(arg);
+    auto* self = ctx->loader;
+
+    if (bserrno != 0) {
+        // Read error, skip remaining of this file
+        DmaAllocator::Free(ctx->dma_buf);
+        delete ctx;
+        self->current_scan_idx_++;
+        self->ScanNextFileBlob();
+        return;
+    }
+
+    // Parse entries from the read chunk
+    const auto& range = self->scan_ranges_[self->current_scan_idx_];
+    size_t entries_found = self->ParseAndRebuildEntries(
+            ctx->dma_buf, ctx->read_size, range.file_id, self->current_scan_offset_);
+
+    DmaAllocator::Free(ctx->dma_buf);
+    size_t read_size = ctx->read_size;
+    delete ctx;
+
+    if (entries_found == 0) {
+        // No valid entries found, skip to next file
+        self->current_scan_idx_++;
+        self->ScanNextFileBlob();
+    } else {
+        // Continue scanning this file
+        self->current_scan_offset_ += read_size;
+        self->ScanBlobChunk();
+    }
 }
 
 }  // namespace spdk_kv

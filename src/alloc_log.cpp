@@ -159,66 +159,61 @@ void AllocLogManager::LoadEntries(
     uint64_t offset_units = kAllocLogAreaOffset / io_unit_size;
     uint64_t length_units = kPageSize / io_unit_size;
 
-    struct ReadCtx {
-        AllocLogManager* mgr;
-        uint32_t checkpoint_seq;
-        std::function<void(int, const std::vector<AllocLogEntry>&)> callback;
-    };
-    auto* ctx = new ReadCtx{this, checkpoint_sequence, std::move(callback)};
+    auto* ctx = new LoadEntriesReadCtx{this, checkpoint_sequence, std::move(callback)};
 
-    spdk_blob_io_read(
-            superblock_blob_, channel_, page_buf_, offset_units, length_units,
-            [](void* arg, int bserrno) {
-                auto* ctx = static_cast<ReadCtx*>(arg);
-                std::vector<AllocLogEntry> result;
+    spdk_blob_io_read(superblock_blob_, channel_, page_buf_, offset_units, length_units,
+                      OnAllocLogPageRead, ctx);
+}
 
-                if (bserrno != 0) {
-                    if (ctx->callback) {
-                        ctx->callback(bserrno, result);
-                    }
-                    delete ctx;
-                    return;
-                }
+void AllocLogManager::OnAllocLogPageRead(void* arg, int bserrno) {
+    auto* ctx = static_cast<LoadEntriesReadCtx*>(arg);
+    std::vector<AllocLogEntry> result;
 
-                // Parse valid entries from the page
-                auto* entries = reinterpret_cast<AllocLogEntry*>(ctx->mgr->page_buf_);
-                uint32_t head = ctx->mgr->head_;
-                uint32_t last_seq = ctx->checkpoint_seq;
+    if (bserrno != 0) {
+        if (ctx->callback) {
+            ctx->callback(bserrno, result);
+        }
+        delete ctx;
+        return;
+    }
 
-                for (uint32_t i = 0; i < kAllocLogCapacity; i++) {
-                    uint32_t slot = (head + i) % kAllocLogCapacity;
-                    const auto& e = entries[slot];
+    // Parse valid entries from the page
+    auto* entries = reinterpret_cast<AllocLogEntry*>(ctx->mgr->page_buf_);
+    uint32_t head = ctx->mgr->head_;
+    uint32_t last_seq = ctx->checkpoint_seq;
 
-                    if (!e.is_valid_magic()) {
-                        break;
-                    }
+    for (uint32_t i = 0; i < kAllocLogCapacity; i++) {
+        uint32_t slot = (head + i) % kAllocLogCapacity;
+        const auto& e = entries[slot];
 
-                    uint32_t computed =
-                            Crc32::Calculate(&e, sizeof(AllocLogEntry) - sizeof(uint32_t));
-                    if (computed != e.checksum) {
-                        break;
-                    }
+        if (!e.is_valid_magic()) {
+            break;
+        }
 
-                    if (e.sequence <= last_seq) {
-                        break;
-                    }
+        uint32_t computed =
+                Crc32::Calculate(&e, sizeof(AllocLogEntry) - sizeof(uint32_t));
+        if (computed != e.checksum) {
+            break;
+        }
 
-                    last_seq = e.sequence;
-                    result.push_back(e);
-                }
+        if (e.sequence <= last_seq) {
+            break;
+        }
 
-                // Update tail based on recovered entries
-                ctx->mgr->tail_ = head + static_cast<uint32_t>(result.size());
-                if (!result.empty()) {
-                    ctx->mgr->sequence_ = result.back().sequence;
-                }
+        last_seq = e.sequence;
+        result.push_back(e);
+    }
 
-                if (ctx->callback) {
-                    ctx->callback(0, result);
-                }
-                delete ctx;
-            },
-            ctx);
+    // Update tail based on recovered entries
+    ctx->mgr->tail_ = head + static_cast<uint32_t>(result.size());
+    if (!result.empty()) {
+        ctx->mgr->sequence_ = result.back().sequence;
+    }
+
+    if (ctx->callback) {
+        ctx->callback(0, result);
+    }
+    delete ctx;
 }
 
 void AllocLogManager::Reclaim() {

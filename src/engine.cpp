@@ -269,40 +269,7 @@ KvError Engine::InitializeNew(const CreateOpts& opts) {
     checkpoint_manager_->SetSuperblockUpdateCallback(
             [this](uint32_t checkpoint_seq, const ActiveBufferPos* positions, uint8_t count,
                    std::function<void(int)> on_complete) {
-                superblock_.checkpoint_global_seq = checkpoint_seq;
-                superblock_.checkpoint_sequence = checkpoint_manager_->GetCheckpointSequence() + 1;
-                superblock_.active_mem_index_area = superblock_.active_mem_index_area == 0 ? 1 : 0;
-                superblock_.active_file_id = active_file_id_;
-                superblock_.total_entries = mem_index_ ? mem_index_->Size() : 0;
-                superblock_.total_data_bytes = total_data_bytes_;
-                superblock_.total_garbage_bytes = total_garbage_bytes_;
-
-                superblock_.active_buffer_count = count;
-                for (uint8_t i = 0; i < count && i < kMaxBufferCount; i++) {
-                    superblock_.active_buffer_positions[i] = positions[i];
-                }
-
-                if (count > 0) {
-                    superblock_.checkpoint_file_id = positions[0].file_id;
-                    superblock_.checkpoint_page_index = positions[0].page_index;
-                }
-
-                for (const auto& f : files_) {
-                    UpdateSuperblockFileMapping(f.get());
-                }
-
-                // Reclaim AllocLog entries (all allocations are now in file_mappings)
-                if (alloc_log_manager_) {
-                    alloc_log_manager_->Reclaim();
-                    superblock_.alloc_log_head = alloc_log_manager_->GetHead();
-                    superblock_.alloc_log_tail = alloc_log_manager_->GetTail();
-                    superblock_.alloc_log_sequence = alloc_log_manager_->GetSequence();
-                }
-
-                KvError err = WriteSuperblock();
-                if (on_complete) {
-                    on_complete(err == KvError::kSuccess ? 0 : -1);
-                }
+                OnSuperblockUpdate(checkpoint_seq, positions, count, std::move(on_complete));
             });
 
     return KvError::kSuccess;
@@ -371,45 +338,7 @@ KvError Engine::LoadExisting(const OpenOpts& opts) {
     checkpoint_manager_->SetSuperblockUpdateCallback(
             [this](uint32_t checkpoint_seq, const ActiveBufferPos* positions, uint8_t count,
                    std::function<void(int)> on_complete) {
-                // Update superblock with snapshot values from checkpoint
-                superblock_.checkpoint_global_seq = checkpoint_seq;
-                superblock_.checkpoint_sequence = checkpoint_manager_->GetCheckpointSequence() + 1;
-                superblock_.active_mem_index_area = superblock_.active_mem_index_area == 0 ? 1 : 0;
-                superblock_.active_file_id = active_file_id_;
-                superblock_.total_entries = mem_index_ ? mem_index_->Size() : 0;
-                superblock_.total_data_bytes = total_data_bytes_;
-                superblock_.total_garbage_bytes = total_garbage_bytes_;
-
-                // Use snapshot buffer positions (not current real-time values)
-                superblock_.active_buffer_count = count;
-                for (uint8_t i = 0; i < count && i < kMaxBufferCount; i++) {
-                    superblock_.active_buffer_positions[i] = positions[i];
-                }
-
-                // Set checkpoint file/page from the first active buffer position
-                if (count > 0) {
-                    superblock_.checkpoint_file_id = positions[0].file_id;
-                    superblock_.checkpoint_page_index = positions[0].page_index;
-                }
-
-                // Update file mappings
-                for (const auto& file : files_) {
-                    UpdateSuperblockFileMapping(file.get());
-                }
-
-                // Reclaim AllocLog entries (all allocations are now in file_mappings)
-                if (alloc_log_manager_) {
-                    alloc_log_manager_->Reclaim();
-                    superblock_.alloc_log_head = alloc_log_manager_->GetHead();
-                    superblock_.alloc_log_tail = alloc_log_manager_->GetTail();
-                    superblock_.alloc_log_sequence = alloc_log_manager_->GetSequence();
-                }
-
-                // Persist superblock
-                KvError err = WriteSuperblock();
-                if (on_complete) {
-                    on_complete(err == KvError::kSuccess ? 0 : -1);
-                }
+                OnSuperblockUpdate(checkpoint_seq, positions, count, std::move(on_complete));
             });
 
     // Step 9: Initialize compaction scheduler
@@ -889,46 +818,24 @@ void Engine::SubmitQueuedWrite(PendingWriteRequest& req, FileInfo* file) {
 
     pending_foreground_count_++;
 
-    uint64_t key = req.key;
-    bool is_delete = req.is_delete;
-    uint64_t old_garbage_size = req.old_garbage_size;
-    KvCallback cb = req.cb;
-    void* cb_arg = req.cb_arg;
-
-    auto completion = [this, key, entry, is_delete, old_garbage_size, cb, cb_arg](int status) {
-        pending_foreground_count_--;
-
-        if (status == 0) {
-            if (is_delete) {
-                mem_index_->Remove(key);
-                total_garbage_bytes_ += old_garbage_size;
-            } else {
-                MemIndexEntry* existing = mem_index_->Find(key);
-                if (existing) {
-                    uint64_t old_size = existing->page_count * kPageSize;
-                    total_garbage_bytes_ += old_size;
-                }
-                mem_index_->Upsert(key, entry);
-            }
-        }
-
-        if (cb) {
-            cb(cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
-        }
-    };
+    auto* ctx = new QueuedWriteCompletionCtx{this,     req.key,       entry,
+                                              req.is_delete, req.old_garbage_size,
+                                              req.cb,        req.cb_arg};
 
     if (req.is_segment_write) {
         // Zero-copy path: writev the caller's segment buffers directly
         SubmitBlobWritev(file, write_offset, req.segment_buf, req.aligned_size,
-                         std::move(completion));
+                         [ctx](int status) {
+                             ctx->engine->OnQueuedWriteComplete(status, ctx);
+                         });
     } else {
         // Legacy path: single DMA buffer
         void* dma_buffer = req.dma_buffer;
         SubmitBlobWrite(
                 file, write_offset, dma_buffer, req.aligned_size,
-                [dma_buffer, completion = std::move(completion)](int status) {
+                [dma_buffer, ctx](int status) {
                     DmaAllocator::Free(dma_buffer);
-                    completion(status);
+                    ctx->engine->OnQueuedWriteComplete(status, ctx);
                 });
     }
 }
@@ -1368,22 +1275,11 @@ void Engine::PutAsync(uint64_t key, SegmentBuf input_buf, KvCallback cb, void* c
 
     pending_foreground_count_++;
 
+    auto* ctx = new PutAsyncWriteCompletionCtx{this, key, entry, cb, cb_arg};
+
     SubmitBlobWritev(file, write_offset, input_buf, total_size,
-                     [this, key, entry, cb, cb_arg](int status) {
-                         pending_foreground_count_--;
-
-                         if (status == 0) {
-                             MemIndexEntry* existing = mem_index_->Find(key);
-                             if (existing) {
-                                 uint64_t old_size = existing->page_count * kPageSize;
-                                 total_garbage_bytes_ += old_size;
-                             }
-                             mem_index_->Upsert(key, entry);
-                         }
-
-                         if (cb) {
-                             cb(cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
-                         }
+                     [ctx](int status) {
+                         ctx->engine->OnPutAsyncWriteComplete(status, ctx);
                      });
 }
 
@@ -1769,30 +1665,7 @@ void Engine::CompactionRemoveFile(uint16_t file_id, std::function<void(bool)> ca
 
     // Close the blob first, then delete it
     CloseBlobForFile(file, [this, file_id, file, callback](bool close_ok) {
-        if (!close_ok) {
-            if (callback) {
-                callback(false);
-            }
-            return;
-        }
-
-        auto& env = SpdkEnv::Instance();
-        if (!env.IsInitialized()) {
-            if (callback) {
-                callback(false);
-            }
-            return;
-        }
-
-        // Delete the blob
-        env.DeleteBlob(file->blob_id, [this, file_id, callback](int status) {
-            // Clean up metadata
-            file_metadata_.erase(file_id);
-
-            if (callback) {
-                callback(status == 0);
-            }
-        });
+        OnCompactionBlobClosed(close_ok, file_id, file, callback);
     });
 }
 
@@ -1823,36 +1696,7 @@ void Engine::AllocateBlobForFile(FileInfo* file, std::function<void(bool success
     // Allocate blob with the configured data file size
     env.AllocateBlob(config_.data_file_size, [this, file, callback](uint64_t blob_id) {
         pending_blob_ops_--;
-
-        if (blob_id == SPDK_BLOBID_INVALID) {
-            if (callback) {
-                callback(false);
-            }
-            return;
-        }
-
-        file->blob_id = blob_id;
-
-        // Write AllocLog entry BEFORE opening blob / writing DataFileHeader.
-        // This ensures crash consistency: if we crash after AllocLog but before
-        // DataFileHeader, recovery can identify this blob via AllocLog.
-        if (alloc_log_manager_ && alloc_log_manager_->IsInitialized()) {
-            alloc_log_manager_->WriteEntry(
-                    blob_id, file->file_id, config_.data_file_size,
-                    [this, file, callback](int status) {
-                        if (status != 0) {
-                            if (callback) {
-                                callback(false);
-                            }
-                            return;
-                        }
-                        // AllocLog persisted, now open blob and write DataFileHeader
-                        OpenBlobForFile(file, callback);
-                    });
-        } else {
-            // No AllocLog manager: legacy path
-            OpenBlobForFile(file, callback);
-        }
+        OnBlobAllocated(blob_id, file, callback);
     });
 }
 
@@ -3127,6 +2971,150 @@ void Engine::ResumeAllocationAfterCheckpoint(int status) {
 
     // AllocLog reclaimed by checkpoint, now proceed with actual file allocation
     AllocateNewFileAsync();
+}
+
+// =========================================================================
+// Extracted named methods (from long lambdas)
+// =========================================================================
+
+void Engine::OnSuperblockUpdate(uint32_t checkpoint_seq, const ActiveBufferPos* positions,
+                                uint8_t count, std::function<void(int)> on_complete) {
+    superblock_.checkpoint_global_seq = checkpoint_seq;
+    superblock_.checkpoint_sequence = checkpoint_manager_->GetCheckpointSequence() + 1;
+    superblock_.active_mem_index_area = superblock_.active_mem_index_area == 0 ? 1 : 0;
+    superblock_.active_file_id = active_file_id_;
+    superblock_.total_entries = mem_index_ ? mem_index_->Size() : 0;
+    superblock_.total_data_bytes = total_data_bytes_;
+    superblock_.total_garbage_bytes = total_garbage_bytes_;
+
+    superblock_.active_buffer_count = count;
+    for (uint8_t i = 0; i < count && i < kMaxBufferCount; i++) {
+        superblock_.active_buffer_positions[i] = positions[i];
+    }
+
+    if (count > 0) {
+        superblock_.checkpoint_file_id = positions[0].file_id;
+        superblock_.checkpoint_page_index = positions[0].page_index;
+    }
+
+    for (const auto& f : files_) {
+        UpdateSuperblockFileMapping(f.get());
+    }
+
+    // Reclaim AllocLog entries (all allocations are now in file_mappings)
+    if (alloc_log_manager_) {
+        alloc_log_manager_->Reclaim();
+        superblock_.alloc_log_head = alloc_log_manager_->GetHead();
+        superblock_.alloc_log_tail = alloc_log_manager_->GetTail();
+        superblock_.alloc_log_sequence = alloc_log_manager_->GetSequence();
+    }
+
+    KvError err = WriteSuperblock();
+    if (on_complete) {
+        on_complete(err == KvError::kSuccess ? 0 : -1);
+    }
+}
+
+void Engine::OnQueuedWriteComplete(int status, QueuedWriteCompletionCtx* ctx) {
+    pending_foreground_count_--;
+
+    if (status == 0) {
+        if (ctx->is_delete) {
+            mem_index_->Remove(ctx->key);
+            total_garbage_bytes_ += ctx->old_garbage_size;
+        } else {
+            MemIndexEntry* existing = mem_index_->Find(ctx->key);
+            if (existing) {
+                uint64_t old_size = existing->page_count * kPageSize;
+                total_garbage_bytes_ += old_size;
+            }
+            mem_index_->Upsert(ctx->key, ctx->entry);
+        }
+    }
+
+    if (ctx->cb) {
+        ctx->cb(ctx->cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
+    }
+    delete ctx;
+}
+
+void Engine::OnPutAsyncWriteComplete(int status, PutAsyncWriteCompletionCtx* ctx) {
+    pending_foreground_count_--;
+
+    if (status == 0) {
+        MemIndexEntry* existing = mem_index_->Find(ctx->key);
+        if (existing) {
+            uint64_t old_size = existing->page_count * kPageSize;
+            total_garbage_bytes_ += old_size;
+        }
+        mem_index_->Upsert(ctx->key, ctx->entry);
+    }
+
+    if (ctx->cb) {
+        ctx->cb(ctx->cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
+    }
+    delete ctx;
+}
+
+void Engine::OnCompactionBlobClosed(bool close_ok, uint16_t file_id, FileInfo* file,
+                                    std::function<void(bool)> callback) {
+    if (!close_ok) {
+        if (callback) {
+            callback(false);
+        }
+        return;
+    }
+
+    auto& env = SpdkEnv::Instance();
+    if (!env.IsInitialized()) {
+        if (callback) {
+            callback(false);
+        }
+        return;
+    }
+
+    // Delete the blob
+    env.DeleteBlob(file->blob_id, [this, file_id, callback](int status) {
+        // Clean up metadata
+        file_metadata_.erase(file_id);
+
+        if (callback) {
+            callback(status == 0);
+        }
+    });
+}
+
+void Engine::OnBlobAllocated(uint64_t blob_id, FileInfo* file,
+                             std::function<void(bool)> callback) {
+    if (blob_id == SPDK_BLOBID_INVALID) {
+        if (callback) {
+            callback(false);
+        }
+        return;
+    }
+
+    file->blob_id = blob_id;
+
+    // Write AllocLog entry BEFORE opening blob / writing DataFileHeader.
+    // This ensures crash consistency: if we crash after AllocLog but before
+    // DataFileHeader, recovery can identify this blob via AllocLog.
+    if (alloc_log_manager_ && alloc_log_manager_->IsInitialized()) {
+        alloc_log_manager_->WriteEntry(
+                blob_id, file->file_id, config_.data_file_size,
+                [this, file, callback](int status) {
+                    if (status != 0) {
+                        if (callback) {
+                            callback(false);
+                        }
+                        return;
+                    }
+                    // AllocLog persisted, now open blob and write DataFileHeader
+                    OpenBlobForFile(file, callback);
+                });
+    } else {
+        // No AllocLog manager: legacy path
+        OpenBlobForFile(file, callback);
+    }
 }
 
 // C API implementation

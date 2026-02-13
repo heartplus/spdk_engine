@@ -138,6 +138,28 @@ private:
     void ScanBlobChunk();
     void OnScanBlobChunkLoaded(int status);
 
+    // Extracted static callbacks for SPDK async IO
+    struct SuperblockReadCtx {
+        IndexLoader* loader;
+        void* buf;
+        size_t size;
+        bool is_backup;
+    };
+    static void OnSuperblockReadComplete(void* arg, int bserrno);
+    static void OnSuperblockBackupReadComplete(void* arg, int bserrno);
+
+    struct SegLoadCtx {
+        IndexLoader* loader;
+    };
+    static void OnDirectSegmentLoaded(void* arg, int bserrno);
+
+    struct ScanCtx {
+        IndexLoader* loader;
+        void* dma_buf;
+        size_t read_size;
+    };
+    static void OnScanChunkRead(void* arg, int bserrno);
+
     // Check if SPDK resources are available
     bool HasSpdkResources() const { return blobstore_ != nullptr && io_channel_ != nullptr; }
 
