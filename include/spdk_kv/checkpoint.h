@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "spdk_kv/append_buffer.h"
+#include "spdk_kv/ctx_pool.h"
 #include "spdk_kv/entry.h"
 #include "spdk_kv/mem_index.h"
 #include "spdk_kv/types.h"
@@ -149,6 +150,12 @@ private:
     // Snapshot active buffer positions from AppendBufferManager
     void SnapshotActiveBufferPositions();
 
+    // Segment write completion context (moved from local scope for pooling)
+    struct SegmentWriteCtx {
+        IncrementalCheckpoint* ckpt;
+        void* dma_buf;
+    };
+
     // Internal helpers
     void ProcessNextSegment();
     void OnSegmentWritten(int status);
@@ -203,6 +210,9 @@ private:
 
     // Superblock update callback (called after sync to atomically persist checkpoint)
     SuperblockUpdateCallback superblock_update_cb_;
+
+    // Context object pool
+    CtxPool<SegmentWriteCtx, 8> segment_write_ctx_pool_;
 };
 
 }  // namespace spdk_kv

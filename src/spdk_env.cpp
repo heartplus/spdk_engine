@@ -195,10 +195,7 @@ void SpdkEnv::AllocateBlob(uint64_t size, std::function<void(uint64_t blob_id)> 
         return;
     }
 
-    struct AllocCtx {
-        std::function<void(uint64_t)> callback;
-    };
-    auto* ctx = new AllocCtx{std::move(callback)};
+    auto* ctx = blob_alloc_ctx_pool_.Alloc(std::move(callback));
 
     // Calculate clusters needed
     uint64_t cluster_size = spdk_bs_get_cluster_size(blobstore_);
@@ -217,10 +214,7 @@ void SpdkEnv::OpenBlob(uint64_t blob_id, std::function<void(spdk_blob* blob)> ca
         return;
     }
 
-    struct OpenCtx {
-        std::function<void(spdk_blob*)> callback;
-    };
-    auto* ctx = new OpenCtx{std::move(callback)};
+    auto* ctx = blob_open_ctx_pool_.Alloc(std::move(callback));
 
     spdk_bs_open_blob(blobstore_, blob_id, OnBlobOpenComplete, ctx);
 }
@@ -231,10 +225,7 @@ void SpdkEnv::CloseBlob(spdk_blob* blob, std::function<void(int status)> callbac
         return;
     }
 
-    struct CloseCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = new CloseCtx{std::move(callback)};
+    auto* ctx = blob_close_ctx_pool_.Alloc(std::move(callback));
 
     spdk_blob_close(blob, OnBlobCloseComplete, ctx);
 }
@@ -245,10 +236,7 @@ void SpdkEnv::DeleteBlob(uint64_t blob_id, std::function<void(int status)> callb
         return;
     }
 
-    struct DeleteCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = new DeleteCtx{std::move(callback)};
+    auto* ctx = blob_delete_ctx_pool_.Alloc(std::move(callback));
 
     spdk_bs_delete_blob(blobstore_, blob_id, OnBlobDeleteComplete, ctx);
 }
@@ -260,10 +248,7 @@ void SpdkEnv::ResizeBlob(spdk_blob* blob, uint64_t clusters,
         return;
     }
 
-    struct ResizeCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = new ResizeCtx{std::move(callback)};
+    auto* ctx = blob_resize_ctx_pool_.Alloc(std::move(callback));
 
     spdk_blob_resize(blob, clusters, OnBlobResizeComplete, ctx);
 }
@@ -274,10 +259,7 @@ void SpdkEnv::SyncBlobMd(spdk_blob* blob, std::function<void(int status)> callba
         return;
     }
 
-    struct SyncCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = new SyncCtx{std::move(callback)};
+    auto* ctx = blob_sync_ctx_pool_.Alloc(std::move(callback));
 
     spdk_blob_sync_md(blob, OnBlobSyncComplete, ctx);
 }
@@ -302,65 +284,53 @@ void SpdkEnv::OnBlobStoreLoadComplete(void* arg, struct spdk_blob_store* bs, int
 }
 
 void SpdkEnv::OnBlobCreateComplete(void* arg, spdk_blob_id blobid, int bserrno) {
-    struct AllocCtx {
-        std::function<void(uint64_t)> callback;
-    };
-    auto* ctx = static_cast<AllocCtx*>(arg);
+    auto* ctx = static_cast<BlobAllocCtx*>(arg);
+    auto cb = std::move(ctx->callback);
+    Instance().blob_alloc_ctx_pool_.Free(ctx);
     if (bserrno == 0) {
-        ctx->callback(blobid);
+        cb(blobid);
     } else {
-        ctx->callback(SPDK_BLOBID_INVALID);
+        cb(SPDK_BLOBID_INVALID);
     }
-    delete ctx;
 }
 
 void SpdkEnv::OnBlobOpenComplete(void* arg, struct spdk_blob* blob, int bserrno) {
-    struct OpenCtx {
-        std::function<void(spdk_blob*)> callback;
-    };
-    auto* ctx = static_cast<OpenCtx*>(arg);
+    auto* ctx = static_cast<BlobOpenCtx*>(arg);
+    auto cb = std::move(ctx->callback);
+    Instance().blob_open_ctx_pool_.Free(ctx);
     if (bserrno == 0) {
-        ctx->callback(blob);
+        cb(blob);
     } else {
-        ctx->callback(nullptr);
+        cb(nullptr);
     }
-    delete ctx;
 }
 
 void SpdkEnv::OnBlobCloseComplete(void* arg, int bserrno) {
-    struct CloseCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = static_cast<CloseCtx*>(arg);
-    ctx->callback(bserrno);
-    delete ctx;
+    auto* ctx = static_cast<BlobCloseCtx*>(arg);
+    auto cb = std::move(ctx->callback);
+    Instance().blob_close_ctx_pool_.Free(ctx);
+    cb(bserrno);
 }
 
 void SpdkEnv::OnBlobDeleteComplete(void* arg, int bserrno) {
-    struct DeleteCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = static_cast<DeleteCtx*>(arg);
-    ctx->callback(bserrno);
-    delete ctx;
+    auto* ctx = static_cast<BlobDeleteCtx*>(arg);
+    auto cb = std::move(ctx->callback);
+    Instance().blob_delete_ctx_pool_.Free(ctx);
+    cb(bserrno);
 }
 
 void SpdkEnv::OnBlobResizeComplete(void* arg, int bserrno) {
-    struct ResizeCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = static_cast<ResizeCtx*>(arg);
-    ctx->callback(bserrno);
-    delete ctx;
+    auto* ctx = static_cast<BlobResizeCtx*>(arg);
+    auto cb = std::move(ctx->callback);
+    Instance().blob_resize_ctx_pool_.Free(ctx);
+    cb(bserrno);
 }
 
 void SpdkEnv::OnBlobSyncComplete(void* arg, int bserrno) {
-    struct SyncCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = static_cast<SyncCtx*>(arg);
-    ctx->callback(bserrno);
-    delete ctx;
+    auto* ctx = static_cast<BlobSyncCtx*>(arg);
+    auto cb = std::move(ctx->callback);
+    Instance().blob_sync_ctx_pool_.Free(ctx);
+    cb(bserrno);
 }
 
 // ============================================================================

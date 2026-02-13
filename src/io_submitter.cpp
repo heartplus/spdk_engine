@@ -72,11 +72,8 @@ void IoSubmitter::SubmitBlobRead(spdk_blob* blob, uint64_t offset, uint32_t page
         return;
     }
 
-    // Create a completion context
-    struct ReadCompletionCtx {
-        IoCompletionCallback callback;
-    };
-    auto* ctx = new ReadCompletionCtx{std::move(callback)};
+    // Create a completion context from pool
+    auto* ctx = read_completion_ctx_pool_.Alloc(std::move(callback), this);
 
     // Calculate offset and length in io_unit_size
     uint64_t io_unit_size = spdk_bs_get_io_unit_size(blobstore_);
@@ -87,10 +84,11 @@ void IoSubmitter::SubmitBlobRead(spdk_blob* blob, uint64_t offset, uint32_t page
             blob, io_channel_, buffer, offset_units, length_units,
             [](void* arg, int bserrno) {
                 auto* ctx = static_cast<ReadCompletionCtx*>(arg);
-                if (ctx->callback) {
-                    ctx->callback(bserrno);
+                auto cb = std::move(ctx->callback);
+                ctx->submitter->read_completion_ctx_pool_.Free(ctx);
+                if (cb) {
+                    cb(bserrno);
                 }
-                delete ctx;
             },
             ctx);
 }
@@ -122,11 +120,8 @@ void IoSubmitter::SubmitBatch() {
         pending_writes_.pop();
 
         if (!pw.contexts.empty() && pw.contexts[0].blob && pw.buffer) {
-            // Create a completion context
-            struct WriteCompletionCtx {
-                IoCompletionCallback callback;
-            };
-            auto* ctx = new WriteCompletionCtx{std::move(pw.callback)};
+            // Create a completion context from pool
+            auto* ctx = write_completion_ctx_pool_.Alloc(std::move(pw.callback), this);
 
             // Submit blob IO write
             // offset and length are in units of io_unit_size (usually 512 bytes)
@@ -138,10 +133,11 @@ void IoSubmitter::SubmitBatch() {
                     pw.contexts[0].blob, io_channel_, pw.buffer->Data(), offset_units, length_units,
                     [](void* arg, int bserrno) {
                         auto* ctx = static_cast<WriteCompletionCtx*>(arg);
-                        if (ctx->callback) {
-                            ctx->callback(bserrno);
+                        auto cb = std::move(ctx->callback);
+                        ctx->submitter->write_completion_ctx_pool_.Free(ctx);
+                        if (cb) {
+                            cb(bserrno);
                         }
-                        delete ctx;
                     },
                     ctx);
         } else {

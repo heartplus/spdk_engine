@@ -15,6 +15,7 @@
 #include "spdk_kv/checkpoint.h"
 #include "spdk_kv/compaction.h"
 #include "spdk_kv/crc32.h"
+#include "spdk_kv/ctx_pool.h"
 #include "spdk_kv/dma_memory_pool.h"
 #include "spdk_kv/entry.h"
 #include "spdk_kv/io_submitter.h"
@@ -289,6 +290,26 @@ private:
     };
     void OnPutAsyncWriteComplete(int status, PutAsyncWriteCompletionCtx* ctx);
 
+    // Blob IO completion contexts (moved from local scope for pooling)
+    struct BlobWriteCtx {
+        std::function<void(int)> callback;
+        Engine* engine;
+    };
+    struct BlobWritevCtx {
+        std::function<void(int)> callback;
+        Engine* engine;
+        iovec iovs[16];
+    };
+    struct BlobReadCtx {
+        std::function<void(int)> callback;
+        Engine* engine;
+    };
+    struct BlobReadvCtx {
+        std::function<void(int)> callback;
+        Engine* engine;
+        iovec iovs[16];
+    };
+
     // CompactionRemoveFile blob close handler
     void OnCompactionBlobClosed(bool close_ok, uint16_t file_id, FileInfo* file,
                                 std::function<void(bool)> callback);
@@ -390,6 +411,17 @@ private:
 
     // NUMA-aware memory pools (optional, created when core_id is set)
     std::unique_ptr<MemoryPools> memory_pools_;
+
+    // Context object pools (avoid heap allocation on IO hot path)
+    CtxPool<GetReadCompletionCtx, 64> get_read_ctx_pool_;
+    CtxPool<OpenBlobForFileCtx, 8> open_blob_ctx_pool_;
+    CtxPool<QueuedWriteCompletionCtx, 64> queued_write_ctx_pool_;
+    CtxPool<PutAsyncWriteCompletionCtx, 64> put_async_ctx_pool_;
+    CtxPool<BlobWriteCtx, 128> blob_write_ctx_pool_;
+    CtxPool<BlobWritevCtx, 64> blob_writev_ctx_pool_;
+    CtxPool<BlobReadCtx, 128> blob_read_ctx_pool_;
+    CtxPool<BlobReadvCtx, 64> blob_readv_ctx_pool_;
+    CtxPool<BufferIoContext, 32> buffer_io_ctx_pool_;
 };
 
 // C-style API wrapper (for compatibility)

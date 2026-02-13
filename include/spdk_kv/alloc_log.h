@@ -9,6 +9,7 @@
 #include <functional>
 #include <vector>
 
+#include "spdk_kv/ctx_pool.h"
 #include "spdk_kv/entry.h"
 #include "spdk_kv/types.h"
 
@@ -66,6 +67,12 @@ public:
     // Check if initialized
     bool IsInitialized() const { return initialized_; }
 
+    // Write completion context (moved from local scope for pooling)
+    struct AllocLogWriteCtx {
+        std::function<void(int)> callback;
+        AllocLogManager* mgr;
+    };
+
 private:
     // Extracted static callback for LoadEntries async read
     struct LoadEntriesReadCtx {
@@ -88,6 +95,10 @@ private:
     // In-memory copy of AllocLog page (4KB, holds kAllocLogCapacity entries)
     void* page_buf_;
     bool initialized_;
+
+    // Context object pools
+    CtxPool<AllocLogWriteCtx, 8> write_ctx_pool_;
+    CtxPool<LoadEntriesReadCtx, 4> load_entries_ctx_pool_;
 };
 
 }  // namespace spdk_kv

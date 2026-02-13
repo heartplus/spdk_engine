@@ -818,9 +818,9 @@ void Engine::SubmitQueuedWrite(PendingWriteRequest& req, FileInfo* file) {
 
     pending_foreground_count_++;
 
-    auto* ctx = new QueuedWriteCompletionCtx{this,     req.key,       entry,
+    auto* ctx = queued_write_ctx_pool_.Alloc(this, req.key, entry,
                                               req.is_delete, req.old_garbage_size,
-                                              req.cb,        req.cb_arg};
+                                              req.cb, req.cb_arg);
 
     if (req.is_segment_write) {
         // Zero-copy path: writev the caller's segment buffers directly
@@ -1275,7 +1275,7 @@ void Engine::PutAsync(uint64_t key, SegmentBuf input_buf, KvCallback cb, void* c
 
     pending_foreground_count_++;
 
-    auto* ctx = new PutAsyncWriteCompletionCtx{this, key, entry, cb, cb_arg};
+    auto* ctx = put_async_ctx_pool_.Alloc(this, key, entry, cb, cb_arg);
 
     SubmitBlobWritev(file, write_offset, input_buf, total_size,
                      [ctx](int status) {
@@ -1347,7 +1347,7 @@ void Engine::GetAsync(uint64_t key, SegmentBuf* output, KvGetCallback cb, void* 
     pending_foreground_count_++;
 
     // Submit async blob read directly to user-provided buffer (zero-copy)
-    auto* read_ctx = new GetReadCompletionCtx{this, output, read_size, cb, cb_arg};
+    auto* read_ctx = get_read_ctx_pool_.Alloc(this, output, read_size, cb, cb_arg);
 
     if (output->cnt_ == 1) {
         // Single contiguous buffer: use standard read
@@ -1370,7 +1370,7 @@ void Engine::HandleGetReadCompletion(int status, GetReadCompletionCtx* ctx) {
         if (ctx->cb) {
             ctx->cb(ctx->cb_arg, static_cast<int>(KvError::kIoError), 0);
         }
-        delete ctx;
+        get_read_ctx_pool_.Free(ctx);
         return;
     }
 
@@ -1386,7 +1386,7 @@ void Engine::HandleGetReadCompletion(int status, GetReadCompletionCtx* ctx) {
         if (ctx->cb) {
             ctx->cb(ctx->cb_arg, static_cast<int>(KvError::kCorruption), 0);
         }
-        delete ctx;
+        get_read_ctx_pool_.Free(ctx);
         return;
     }
 
@@ -1403,7 +1403,7 @@ void Engine::HandleGetReadCompletion(int status, GetReadCompletionCtx* ctx) {
         // Return actual value length (excluding the 512-byte header)
         ctx->cb(ctx->cb_arg, 0, value_len);
     }
-    delete ctx;
+    get_read_ctx_pool_.Free(ctx);
 }
 
 void Engine::DeleteAsync(uint64_t key, KvCallback cb, void* cb_arg) {
@@ -1719,7 +1719,7 @@ void Engine::OpenBlobForFile(FileInfo* file, std::function<void(bool success)> c
     pending_blob_ops_++;
 
     // Use named completion handler instead of lambda
-    auto* open_ctx = new OpenBlobForFileCtx{this, file, std::move(callback)};
+    auto* open_ctx = open_blob_ctx_pool_.Alloc(this, file, std::move(callback));
     env.OpenBlob(file->blob_id, [open_ctx](spdk_blob* blob) {
         open_ctx->engine->HandleBlobOpenedForFile(blob, open_ctx);
     });
@@ -1732,7 +1732,7 @@ void Engine::HandleBlobOpenedForFile(spdk_blob* blob, OpenBlobForFileCtx* ctx) {
         if (ctx->callback) {
             ctx->callback(false);
         }
-        delete ctx;
+        open_blob_ctx_pool_.Free(ctx);
         return;
     }
 
@@ -1746,7 +1746,7 @@ void Engine::HandleBlobOpenedForFile(spdk_blob* blob, OpenBlobForFileCtx* ctx) {
         if (ctx->callback) {
             ctx->callback(false);
         }
-        delete ctx;
+        open_blob_ctx_pool_.Free(ctx);
         return;
     }
 
@@ -1762,7 +1762,7 @@ void Engine::HandleBlobOpenedForFile(spdk_blob* blob, OpenBlobForFileCtx* ctx) {
     // Write header to blob
     FileInfo* file = ctx->file;
     auto callback = std::move(ctx->callback);
-    delete ctx;
+    open_blob_ctx_pool_.Free(ctx);
 
     SubmitBlobWrite(file, 0, header, kPageSize, [header, callback](int status) {
         DmaAllocator::Free(header);
@@ -1830,20 +1830,18 @@ void Engine::SubmitBlobWrite(FileInfo* file, uint64_t offset, void* data, uint32
     uint64_t offset_units = offset / io_unit_size;
     uint64_t length_units = length / io_unit_size;
 
-    // Create completion context
-    struct WriteCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = new WriteCtx{std::move(callback)};
+    // Create completion context from pool
+    auto* ctx = blob_write_ctx_pool_.Alloc(std::move(callback), this);
 
     spdk_blob_io_write(
             file->blob, channel, data, offset_units, length_units,
             [](void* arg, int bserrno) {
-                auto* ctx = static_cast<WriteCtx*>(arg);
-                if (ctx->callback) {
-                    ctx->callback(bserrno);
+                auto* ctx = static_cast<BlobWriteCtx*>(arg);
+                auto cb = std::move(ctx->callback);
+                ctx->engine->blob_write_ctx_pool_.Free(ctx);
+                if (cb) {
+                    cb(bserrno);
                 }
-                delete ctx;
             },
             ctx);
 }
@@ -1879,12 +1877,9 @@ void Engine::SubmitBlobWritev(FileInfo* file, uint64_t offset, const SegmentBuf&
     uint64_t length_units = total_length / io_unit_size;
 
     // Completion context holds the callback and a copy of the iovec array
-    struct WritevCtx {
-        std::function<void(int)> callback;
-        iovec iovs[16];
-    };
-    auto* ctx = new WritevCtx();
+    auto* ctx = blob_writev_ctx_pool_.Alloc();
     ctx->callback = std::move(callback);
+    ctx->engine = this;
     for (size_t i = 0; i < buf.cnt_; i++) {
         ctx->iovs[i] = buf.buffers_[i];
     }
@@ -1892,11 +1887,12 @@ void Engine::SubmitBlobWritev(FileInfo* file, uint64_t offset, const SegmentBuf&
     spdk_blob_io_writev(
             file->blob, channel, ctx->iovs, static_cast<int>(buf.cnt_), offset_units, length_units,
             [](void* arg, int bserrno) {
-                auto* ctx = static_cast<WritevCtx*>(arg);
-                if (ctx->callback) {
-                    ctx->callback(bserrno);
+                auto* ctx = static_cast<BlobWritevCtx*>(arg);
+                auto cb = std::move(ctx->callback);
+                ctx->engine->blob_writev_ctx_pool_.Free(ctx);
+                if (cb) {
+                    cb(bserrno);
                 }
-                delete ctx;
             },
             ctx);
 }
@@ -1931,20 +1927,18 @@ void Engine::SubmitBlobRead(FileInfo* file, uint64_t offset, void* buffer, uint3
     uint64_t offset_units = offset / io_unit_size;
     uint64_t length_units = length / io_unit_size;
 
-    // Create completion context
-    struct ReadCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = new ReadCtx{std::move(callback)};
+    // Create completion context from pool
+    auto* ctx = blob_read_ctx_pool_.Alloc(std::move(callback), this);
 
     spdk_blob_io_read(
             file->blob, channel, buffer, offset_units, length_units,
             [](void* arg, int bserrno) {
-                auto* ctx = static_cast<ReadCtx*>(arg);
-                if (ctx->callback) {
-                    ctx->callback(bserrno);
+                auto* ctx = static_cast<BlobReadCtx*>(arg);
+                auto cb = std::move(ctx->callback);
+                ctx->engine->blob_read_ctx_pool_.Free(ctx);
+                if (cb) {
+                    cb(bserrno);
                 }
-                delete ctx;
             },
             ctx);
 }
@@ -1979,12 +1973,9 @@ void Engine::SubmitBlobReadv(FileInfo* file, uint64_t offset, const SegmentBuf& 
     uint64_t length_units = total_length / io_unit_size;
 
     // Completion context holds the callback and a copy of the iovec array
-    struct ReadvCtx {
-        std::function<void(int)> callback;
-        iovec iovs[16];
-    };
-    auto* ctx = new ReadvCtx();
+    auto* ctx = blob_readv_ctx_pool_.Alloc();
     ctx->callback = std::move(callback);
+    ctx->engine = this;
     for (size_t i = 0; i < buf.cnt_; i++) {
         ctx->iovs[i] = buf.buffers_[i];
     }
@@ -1992,11 +1983,12 @@ void Engine::SubmitBlobReadv(FileInfo* file, uint64_t offset, const SegmentBuf& 
     spdk_blob_io_readv(
             file->blob, channel, ctx->iovs, static_cast<int>(buf.cnt_), offset_units, length_units,
             [](void* arg, int bserrno) {
-                auto* ctx = static_cast<ReadvCtx*>(arg);
-                if (ctx->callback) {
-                    ctx->callback(bserrno);
+                auto* ctx = static_cast<BlobReadvCtx*>(arg);
+                auto cb = std::move(ctx->callback);
+                ctx->engine->blob_readv_ctx_pool_.Free(ctx);
+                if (cb) {
+                    cb(bserrno);
                 }
-                delete ctx;
             },
             ctx);
 }
@@ -2527,8 +2519,8 @@ void Engine::SubmitBufferIo(AppendBuffer* buffer) {
     file->size = file->write_offset;
     total_data_bytes_ += buffer->Used();
 
-    // Create completion context on heap
-    auto* ctx = new BufferIoContext{this, buffer, file->file_id, base_page_offset};
+    // Create completion context from pool
+    auto* ctx = buffer_io_ctx_pool_.Alloc(this, buffer, file->file_id, base_page_offset);
 
     pending_foreground_count_++;
 
@@ -2572,7 +2564,7 @@ void Engine::OnBufferIoComplete(int status, BufferIoContext* ctx) {
     }
 
     buffer_manager_->ReturnBuffer(ctx->buffer);
-    delete ctx;
+    buffer_io_ctx_pool_.Free(ctx);
 }
 
 void Engine::OnBackpressureResume(void* arg) {
@@ -3035,7 +3027,7 @@ void Engine::OnQueuedWriteComplete(int status, QueuedWriteCompletionCtx* ctx) {
     if (ctx->cb) {
         ctx->cb(ctx->cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
     }
-    delete ctx;
+    queued_write_ctx_pool_.Free(ctx);
 }
 
 void Engine::OnPutAsyncWriteComplete(int status, PutAsyncWriteCompletionCtx* ctx) {
@@ -3053,7 +3045,7 @@ void Engine::OnPutAsyncWriteComplete(int status, PutAsyncWriteCompletionCtx* ctx
     if (ctx->cb) {
         ctx->cb(ctx->cb_arg, status == 0 ? 0 : static_cast<int>(KvError::kIoError));
     }
-    delete ctx;
+    put_async_ctx_pool_.Free(ctx);
 }
 
 void Engine::OnCompactionBlobClosed(bool close_ok, uint16_t file_id, FileInfo* file,
@@ -3217,6 +3209,8 @@ struct CApiGetAsyncCtx {
     void* user_cb_arg;
 };
 
+static CtxPool<CApiGetAsyncCtx, 64> g_capi_get_ctx_pool;
+
 static void CApiGetAsyncCallback(void* arg, int status, uint32_t actual_len) {
     auto* ctx = static_cast<CApiGetAsyncCtx*>(arg);
 
@@ -3228,7 +3222,7 @@ static void CApiGetAsyncCallback(void* arg, int status, uint32_t actual_len) {
             if (ctx->user_cb) {
                 ctx->user_cb(ctx->user_cb_arg, static_cast<int>(KvError::kValueTooLarge), actual_len);
             }
-            delete ctx;
+            g_capi_get_ctx_pool.Free(ctx);
             return;
         }
 
@@ -3246,7 +3240,7 @@ static void CApiGetAsyncCallback(void* arg, int status, uint32_t actual_len) {
     if (ctx->user_cb) {
         ctx->user_cb(ctx->user_cb_arg, status, actual_len);
     }
-    delete ctx;
+    g_capi_get_ctx_pool.Free(ctx);
 }
 
 void spdk_kv_get_async(spdk_kv_handle handle, uint64_t key, void* value_buf, uint32_t buf_len,
@@ -3272,7 +3266,7 @@ void spdk_kv_get_async(spdk_kv_handle handle, uint64_t key, void* value_buf, uin
         return;
     }
 
-    auto* ctx = new CApiGetAsyncCtx{};
+    auto* ctx = g_capi_get_ctx_pool.Alloc();
     ctx->dma_buffer = dma_buffer;
     ctx->dma_buf_size = alloc_size;
     ctx->user_buf = value_buf;

@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "spdk_kv/ctx_pool.h"
 #include "spdk_kv/types.h"
 
 namespace spdk_kv {
@@ -102,6 +103,26 @@ public:
     // Stop polling thread
     void StopPolling();
 
+    // Blob operation context types (moved from local scope for pooling)
+    struct BlobAllocCtx {
+        std::function<void(uint64_t)> callback;
+    };
+    struct BlobOpenCtx {
+        std::function<void(spdk_blob*)> callback;
+    };
+    struct BlobCloseCtx {
+        std::function<void(int)> callback;
+    };
+    struct BlobDeleteCtx {
+        std::function<void(int)> callback;
+    };
+    struct BlobResizeCtx {
+        std::function<void(int)> callback;
+    };
+    struct BlobSyncCtx {
+        std::function<void(int)> callback;
+    };
+
 private:
     SpdkEnv();
     ~SpdkEnv();
@@ -132,6 +153,14 @@ private:
     bool initialized_;
     bool polling_;
     SpdkEnvOpts opts_;
+
+    // Context object pools
+    CtxPool<BlobAllocCtx, 16> blob_alloc_ctx_pool_;
+    CtxPool<BlobOpenCtx, 16> blob_open_ctx_pool_;
+    CtxPool<BlobCloseCtx, 16> blob_close_ctx_pool_;
+    CtxPool<BlobDeleteCtx, 16> blob_delete_ctx_pool_;
+    CtxPool<BlobResizeCtx, 8> blob_resize_ctx_pool_;
+    CtxPool<BlobSyncCtx, 8> blob_sync_ctx_pool_;
 };
 
 // DMA memory allocator for SPDK

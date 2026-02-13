@@ -112,7 +112,7 @@ void IndexLoader::LoadSuperblockFromBlob() {
     uint64_t io_unit_size = spdk_bs_get_io_unit_size(blobstore_);
     uint64_t length_units = sb_aligned_size / io_unit_size;
 
-    auto* ctx = new SuperblockReadCtx{this, read_buf, sb_aligned_size, false};
+    auto* ctx = superblock_read_ctx_pool_.Alloc(this, read_buf, sb_aligned_size, false);
 
     spdk_blob_io_read(superblock_blob_, io_channel_, read_buf,
                       kSuperblockPrimaryOffset / io_unit_size, length_units,
@@ -223,12 +223,7 @@ void IndexLoader::ReadNextMemIndexChunk() {
     uint64_t offset_units = mem_index_read_offset_ / io_unit_size;
     uint64_t length_units = aligned_chunk / io_unit_size;
 
-    struct ChunkCtx {
-        IndexLoader* loader;
-        void* dma_buf;
-        size_t chunk_size;
-    };
-    auto* ctx = new ChunkCtx{this, dma_buf, chunk_size};
+    auto* ctx = chunk_ctx_pool_.Alloc(this, dma_buf, chunk_size);
 
     spdk_blob_io_read(
             blob, io_channel_, dma_buf, offset_units, length_units,
@@ -243,7 +238,7 @@ void IndexLoader::ReadNextMemIndexChunk() {
                 }
 
                 DmaAllocator::Free(ctx->dma_buf);
-                delete ctx;
+                self->chunk_ctx_pool_.Free(ctx);
 
                 self->OnMemIndexChunkLoaded(bserrno);
             },
@@ -399,7 +394,7 @@ void IndexLoader::LoadAsMemoryDumpFromBlob(int area) {
         void* target_addr =
                 reinterpret_cast<char*>(mem_index_->Entries()) + seg * segment_size;
 
-        auto* ctx = new SegLoadCtx{this};
+        auto* ctx = seg_load_ctx_pool_.Alloc(this);
 
         spdk_blob_io_read(blob, io_channel_, target_addr, offset_units, length_units,
                           OnDirectSegmentLoaded, ctx);
@@ -598,7 +593,7 @@ void IndexLoader::ScanBlobChunk() {
     uint64_t offset_units = current_scan_offset_ / io_unit_size;
     uint64_t length_units = aligned_read / io_unit_size;
 
-    auto* ctx = new ScanCtx{this, dma_buf, read_size};
+    auto* ctx = scan_ctx_pool_.Alloc(this, dma_buf, read_size);
 
     spdk_blob_io_read(blob, io_channel_, dma_buf, offset_units, length_units,
                       OnScanChunkRead, ctx);
@@ -747,7 +742,7 @@ void IndexLoader::OnSuperblockReadComplete(void* arg, int bserrno) {
             if (stored_checksum == computed) {
                 std::memcpy(&self->superblock_, sb, sizeof(Superblock));
                 DmaAllocator::Free(ctx->buf);
-                delete ctx;
+                self->superblock_read_ctx_pool_.Free(ctx);
                 self->TransitionTo(State::kLoadingMemIndexA);
                 self->LoadMemIndexArea(0);
                 return;
@@ -781,7 +776,7 @@ void IndexLoader::OnSuperblockBackupReadComplete(void* arg, int bserrno) {
             if (stored == computed) {
                 std::memcpy(&self->superblock_, sb, sizeof(Superblock));
                 DmaAllocator::Free(ctx->buf);
-                delete ctx;
+                self->superblock_read_ctx_pool_.Free(ctx);
                 self->TransitionTo(State::kLoadingMemIndexA);
                 self->LoadMemIndexArea(0);
                 return;
@@ -791,7 +786,7 @@ void IndexLoader::OnSuperblockBackupReadComplete(void* arg, int bserrno) {
 
     // Both superblocks invalid
     DmaAllocator::Free(ctx->buf);
-    delete ctx;
+    self->superblock_read_ctx_pool_.Free(ctx);
     self->last_error_ = KvError::kCorruption;
     self->TransitionTo(State::kError);
     if (self->callback_) {
@@ -802,7 +797,7 @@ void IndexLoader::OnSuperblockBackupReadComplete(void* arg, int bserrno) {
 void IndexLoader::OnDirectSegmentLoaded(void* arg, int bserrno) {
     auto* ctx = static_cast<SegLoadCtx*>(arg);
     auto* self = ctx->loader;
-    delete ctx;
+    self->seg_load_ctx_pool_.Free(ctx);
 
     if (bserrno != 0) {
         self->has_load_error_ = true;
@@ -835,7 +830,7 @@ void IndexLoader::OnScanChunkRead(void* arg, int bserrno) {
     if (bserrno != 0) {
         // Read error, skip remaining of this file
         DmaAllocator::Free(ctx->dma_buf);
-        delete ctx;
+        self->scan_ctx_pool_.Free(ctx);
         self->current_scan_idx_++;
         self->ScanNextFileBlob();
         return;
@@ -848,7 +843,7 @@ void IndexLoader::OnScanChunkRead(void* arg, int bserrno) {
 
     DmaAllocator::Free(ctx->dma_buf);
     size_t read_size = ctx->read_size;
-    delete ctx;
+    self->scan_ctx_pool_.Free(ctx);
 
     if (entries_found == 0) {
         // No valid entries found, skip to next file

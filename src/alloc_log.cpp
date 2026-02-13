@@ -86,19 +86,17 @@ void AllocLogManager::WriteEntry(uint64_t blob_id, uint16_t file_id, uint64_t fi
     uint64_t offset_units = kAllocLogAreaOffset / io_unit_size;
     uint64_t length_units = kPageSize / io_unit_size;
 
-    struct WriteCtx {
-        std::function<void(int)> callback;
-    };
-    auto* ctx = new WriteCtx{std::move(callback)};
+    auto* ctx = write_ctx_pool_.Alloc(std::move(callback), this);
 
     spdk_blob_io_write(
             superblock_blob_, channel_, page_buf_, offset_units, length_units,
             [](void* arg, int bserrno) {
-                auto* ctx = static_cast<WriteCtx*>(arg);
-                if (ctx->callback) {
-                    ctx->callback(bserrno);
+                auto* ctx = static_cast<AllocLogWriteCtx*>(arg);
+                auto cb = std::move(ctx->callback);
+                ctx->mgr->write_ctx_pool_.Free(ctx);
+                if (cb) {
+                    cb(bserrno);
                 }
-                delete ctx;
             },
             ctx);
 }
@@ -159,7 +157,7 @@ void AllocLogManager::LoadEntries(
     uint64_t offset_units = kAllocLogAreaOffset / io_unit_size;
     uint64_t length_units = kPageSize / io_unit_size;
 
-    auto* ctx = new LoadEntriesReadCtx{this, checkpoint_sequence, std::move(callback)};
+    auto* ctx = load_entries_ctx_pool_.Alloc(this, checkpoint_sequence, std::move(callback));
 
     spdk_blob_io_read(superblock_blob_, channel_, page_buf_, offset_units, length_units,
                       OnAllocLogPageRead, ctx);
@@ -170,10 +168,11 @@ void AllocLogManager::OnAllocLogPageRead(void* arg, int bserrno) {
     std::vector<AllocLogEntry> result;
 
     if (bserrno != 0) {
-        if (ctx->callback) {
-            ctx->callback(bserrno, result);
+        auto cb = std::move(ctx->callback);
+        ctx->mgr->load_entries_ctx_pool_.Free(ctx);
+        if (cb) {
+            cb(bserrno, result);
         }
-        delete ctx;
         return;
     }
 
@@ -210,10 +209,11 @@ void AllocLogManager::OnAllocLogPageRead(void* arg, int bserrno) {
         ctx->mgr->sequence_ = result.back().sequence;
     }
 
-    if (ctx->callback) {
-        ctx->callback(0, result);
+    auto cb = std::move(ctx->callback);
+    ctx->mgr->load_entries_ctx_pool_.Free(ctx);
+    if (cb) {
+        cb(0, result);
     }
-    delete ctx;
 }
 
 void AllocLogManager::Reclaim() {

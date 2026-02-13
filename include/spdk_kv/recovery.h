@@ -9,6 +9,7 @@
 #include <functional>
 #include <vector>
 
+#include "spdk_kv/ctx_pool.h"
 #include "spdk_kv/entry.h"
 #include "spdk_kv/mem_index.h"
 #include "spdk_kv/types.h"
@@ -153,6 +154,12 @@ private:
     };
     static void OnDirectSegmentLoaded(void* arg, int bserrno);
 
+    struct ChunkCtx {
+        IndexLoader* loader;
+        void* dma_buf;
+        size_t chunk_size;
+    };
+
     struct ScanCtx {
         IndexLoader* loader;
         void* dma_buf;
@@ -223,6 +230,12 @@ private:
     // DMA buffer for blob IO
     void* dma_buffer_;
     size_t dma_buffer_size_;
+
+    // Context object pools
+    CtxPool<SuperblockReadCtx, 2> superblock_read_ctx_pool_;
+    CtxPool<ChunkCtx, 4> chunk_ctx_pool_;
+    CtxPool<SegLoadCtx, 128> seg_load_ctx_pool_;
+    CtxPool<ScanCtx, 4> scan_ctx_pool_;
 };
 
 }  // namespace spdk_kv

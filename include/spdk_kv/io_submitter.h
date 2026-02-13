@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "spdk_kv/append_buffer.h"
+#include "spdk_kv/ctx_pool.h"
 #include "spdk_kv/entry.h"
 #include "spdk_kv/types.h"
 
@@ -96,6 +97,16 @@ public:
     // Flush pending writes
     void FlushPendingWrites();
 
+    // IO completion context types (moved from local scope for pooling)
+    struct ReadCompletionCtx {
+        IoCompletionCallback callback;
+        IoSubmitter* submitter;
+    };
+    struct WriteCompletionCtx {
+        IoCompletionCallback callback;
+        IoSubmitter* submitter;
+    };
+
 private:
     // Batch submission
     void SubmitBatch();
@@ -119,6 +130,10 @@ private:
         IoCompletionCallback callback;
     };
     std::queue<PendingWrite> pending_writes_;
+
+    // Context object pools
+    CtxPool<ReadCompletionCtx, 64> read_completion_ctx_pool_;
+    CtxPool<WriteCompletionCtx, 32> write_completion_ctx_pool_;
 };
 
 // Flush trigger for determining when to submit IO

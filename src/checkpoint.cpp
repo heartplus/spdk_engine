@@ -186,21 +186,18 @@ void IncrementalCheckpoint::ProcessNextSegment() {
         uint64_t blob_offset = (static_cast<uint64_t>(seg_id) * kMemIndexSegmentSize) / io_unit_size;
         uint64_t length_units = aligned_size / io_unit_size;
 
-        struct SegmentWriteCtx {
-            IncrementalCheckpoint* ckpt;
-            void* dma_buf;
-        };
-        auto* write_ctx = new SegmentWriteCtx{this, dma_buf};
+        auto* write_ctx = segment_write_ctx_pool_.Alloc(this, dma_buf);
 
         io_pending_ = true;
         spdk_blob_io_write(
                 mem_index_blob_, io_channel_, dma_buf, blob_offset, length_units,
                 [](void* arg, int bserrno) {
                     auto* ctx = static_cast<SegmentWriteCtx*>(arg);
-                    ctx->ckpt->io_pending_ = false;
+                    auto* ckpt = ctx->ckpt;
+                    ckpt->io_pending_ = false;
                     DmaAllocator::Free(ctx->dma_buf);
-                    ctx->ckpt->OnSegmentWritten(bserrno);
-                    delete ctx;
+                    ckpt->segment_write_ctx_pool_.Free(ctx);
+                    ckpt->OnSegmentWritten(bserrno);
                 },
                 write_ctx);
     } else {
