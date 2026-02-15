@@ -11,7 +11,7 @@ namespace spdk_kv {
 // CRC32 implementation (IEEE polynomial)
 class Crc32 {
 public:
-    static uint32_t Calculate(const void* data, size_t length) {
+    static uint32_t calculate(const void* data, size_t length) {
         static const uint32_t table[256] = {
                 0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f, 0xe963a535,
                 0x9e6495a3, 0x0edb8832, 0x79dcb8a4, 0xe0d5e91e, 0x97d2d988, 0x09b64c2b, 0x7eb17cbd,
@@ -61,7 +61,7 @@ public:
         return crc ^ 0xFFFFFFFF;
     }
 
-    static uint32_t Combine(uint32_t crc1, const void* data, size_t length) {
+    static uint32_t combine(uint32_t crc1, const void* data, size_t length) {
         const uint8_t* buf = static_cast<const uint8_t*>(data);
         uint32_t crc = crc1 ^ 0xFFFFFFFF;
 

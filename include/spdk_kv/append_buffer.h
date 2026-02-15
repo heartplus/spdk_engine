@@ -30,8 +30,8 @@ public:
         std::memset(rdma_slots_, 0, sizeof(rdma_slots_));
     }
 
-    // Reserve space in the buffer
-    void* Reserve(size_t len) {
+    // reserve space in the buffer
+    void* reserve(size_t len) {
         if (used_ + len > capacity_) {
             return nullptr;
         }
@@ -41,8 +41,8 @@ public:
         return ptr;
     }
 
-    // Append data to the buffer
-    int64_t Append(const void* data, size_t len) {
+    // append data to the buffer
+    int64_t append(const void* data, size_t len) {
         if (used_ + len > capacity_) {
             return -1;
         }
@@ -54,13 +54,13 @@ public:
         return offset;
     }
 
-    // Get offset of a pointer within the buffer
-    uint32_t GetOffset(void* ptr) const {
+    // get offset of a pointer within the buffer
+    uint32_t get_offset(void* ptr) const {
         return static_cast<uint32_t>(static_cast<char*>(ptr) - static_cast<char*>(data_));
     }
 
-    // Reset buffer for reuse
-    void Reset() {
+    // reset buffer for reuse
+    void reset() {
         used_ = 0;
         entry_count_ = 0;
         epoch_++;
@@ -70,15 +70,15 @@ public:
     }
 
     // Accessors
-    void* Data() { return data_; }
-    const void* Data() const { return data_; }
-    size_t Capacity() const { return capacity_; }
-    size_t Used() const { return used_; }
-    size_t EntryCount() const { return entry_count_; }
-    uint32_t Epoch() const { return epoch_; }
+    void* data() { return data_; }
+    const void* data() const { return data_; }
+    size_t capacity() const { return capacity_; }
+    size_t used() const { return used_; }
+    size_t entry_count() const { return entry_count_; }
+    uint32_t epoch() const { return epoch_; }
 
-    bool IsFull() const { return used_ >= kFlushThreshold; }
-    bool IsEmpty() const { return used_ == 0; }
+    bool is_full() const { return used_ >= kFlushThreshold; }
+    bool is_empty() const { return used_ == 0; }
 
     // RDMA slot management
     static constexpr size_t kMaxSlotsPerBuffer = 64;
@@ -90,36 +90,36 @@ public:
         uint32_t size;
     };
 
-    void* AllocRdmaSlot(uint32_t size, uint32_t* out_slot_id) {
+    void* alloc_rdma_slot(uint32_t size, uint32_t* out_slot_id) {
         if (next_slot_id_ >= kMaxSlotsPerBuffer) {
             return nullptr;
         }
-        void* slot = Reserve(size);
+        void* slot = reserve(size);
         if (slot) {
             uint32_t slot_id = next_slot_id_++;
-            rdma_slots_[slot_id] = {true, false, GetOffset(slot), size};
+            rdma_slots_[slot_id] = {true, false, get_offset(slot), size};
             active_rdma_slot_count_++;
             *out_slot_id = slot_id;
         }
         return slot;
     }
 
-    void MarkRdmaComplete(uint32_t slot_id) {
+    void mark_rdma_complete(uint32_t slot_id) {
         if (slot_id < kMaxSlotsPerBuffer) {
             rdma_slots_[slot_id].rdma_write_complete = true;
         }
     }
 
-    void ReleaseRdmaSlot(uint32_t slot_id) {
+    void release_rdma_slot(uint32_t slot_id) {
         if (slot_id < kMaxSlotsPerBuffer && rdma_slots_[slot_id].is_allocated) {
             rdma_slots_[slot_id].is_allocated = false;
             active_rdma_slot_count_--;
         }
     }
 
-    bool CanReset() const { return active_rdma_slot_count_ == 0; }
+    bool can_reset() const { return active_rdma_slot_count_ == 0; }
 
-    bool CanSubmit() const {
+    bool can_submit() const {
         for (uint32_t i = 0; i < kMaxSlotsPerBuffer; i++) {
             if (rdma_slots_[i].is_allocated && !rdma_slots_[i].rdma_write_complete) {
                 return false;
@@ -147,7 +147,7 @@ class SimpleRing {
 public:
     SimpleRing() : head_(0), tail_(0) {}
 
-    bool Enqueue(T item) {
+    bool enqueue(T item) {
         size_t next_head = (head_ + 1) % N;
         if (next_head == tail_) {
             return false;  // Full
@@ -157,7 +157,7 @@ public:
         return true;
     }
 
-    bool Dequeue(T* item) {
+    bool dequeue(T* item) {
         if (tail_ == head_) {
             return false;  // Empty
         }
@@ -166,14 +166,14 @@ public:
         return true;
     }
 
-    size_t Count() const {
+    size_t count() const {
         if (head_ >= tail_) {
             return head_ - tail_;
         }
         return N - tail_ + head_;
     }
 
-    bool IsEmpty() const { return head_ == tail_; }
+    bool is_empty() const { return head_ == tail_; }
 
 private:
     T buffer_[N];
@@ -181,7 +181,7 @@ private:
     size_t tail_;
 };
 
-// Append buffer manager
+// append buffer manager
 class AppendBufferManager {
 public:
     using BackpressureCallback = void (*)(void* arg);
@@ -199,8 +199,8 @@ public:
         }
     }
 
-    // Initialize with pre-allocated buffers
-    bool Initialize(size_t buffer_count, size_t buffer_size) {
+    // initialize with pre-allocated buffers
+    bool initialize(size_t buffer_count, size_t buffer_size) {
         buffer_size_ = buffer_size;
 
         for (size_t i = 0; i < buffer_count; i++) {
@@ -210,24 +210,24 @@ public:
             }
             auto* buf = new AppendBuffer(mem, buffer_size);
             all_buffers_.push_back(buf);
-            complete_ring_.Enqueue(buf);
+            complete_ring_.enqueue(buf);
         }
 
         current_buffer_count_ = buffer_count;
 
-        // Get active buffer
-        complete_ring_.Dequeue(&active_buffer_);
+        // get active buffer
+        complete_ring_.dequeue(&active_buffer_);
         return active_buffer_ != nullptr;
     }
 
-    // Reserve space with backpressure check
-    void* ReserveWithBackpressure(size_t len, int* error) {
-        if (CheckBackpressure()) {
+    // reserve space with backpressure check
+    void* reserve_with_backpressure(size_t len, int* error) {
+        if (check_backpressure()) {
             *error = static_cast<int>(KvError::kBackpressure);
             return nullptr;
         }
 
-        void* slot = Reserve(len);
+        void* slot = reserve(len);
         if (!slot) {
             *error = static_cast<int>(KvError::kBackpressure);
         } else {
@@ -237,25 +237,25 @@ public:
     }
 
     // Submit current buffer to IO queue
-    void SubmitCurrentBuffer() {
-        if (!active_buffer_ || active_buffer_->IsEmpty()) {
+    void submit_current_buffer() {
+        if (!active_buffer_ || active_buffer_->is_empty()) {
             return;
         }
 
-        submit_ring_.Enqueue(active_buffer_);
+        submit_ring_.enqueue(active_buffer_);
 
         // Try to get free buffer
-        if (!complete_ring_.Dequeue(&active_buffer_)) {
+        if (!complete_ring_.dequeue(&active_buffer_)) {
             active_buffer_ = nullptr;
         }
     }
 
-    // Get pending buffers for IO submission
-    size_t GetPendingBuffers(AppendBuffer** buffers, size_t max_count) {
+    // get pending buffers for IO submission
+    size_t get_pending_buffers(AppendBuffer** buffers, size_t max_count) {
         size_t count = 0;
         while (count < max_count) {
             AppendBuffer* buf;
-            if (!submit_ring_.Dequeue(&buf)) {
+            if (!submit_ring_.dequeue(&buf)) {
                 break;
             }
             buffers[count++] = buf;
@@ -264,28 +264,28 @@ public:
     }
 
     // Return buffer after IO complete
-    void ReturnBuffer(AppendBuffer* buf) {
-        if (!buf->CanReset()) {
+    void return_buffer(AppendBuffer* buf) {
+        if (!buf->can_reset()) {
             pending_reset_queue_.push(buf);
             return;
         }
 
-        buf->Reset();
-        complete_ring_.Enqueue(buf);
+        buf->reset();
+        complete_ring_.enqueue(buf);
 
         if (active_buffer_ == nullptr) {
-            complete_ring_.Dequeue(&active_buffer_);
+            complete_ring_.dequeue(&active_buffer_);
         }
     }
 
     // Check pending resets (call in polling loop)
-    void CheckPendingResets() {
+    void check_pending_resets() {
         while (!pending_reset_queue_.empty()) {
             AppendBuffer* buf = pending_reset_queue_.front();
-            if (buf->CanReset()) {
+            if (buf->can_reset()) {
                 pending_reset_queue_.pop();
-                buf->Reset();
-                complete_ring_.Enqueue(buf);
+                buf->reset();
+                complete_ring_.enqueue(buf);
             } else {
                 break;  // Avoid infinite loop
             }
@@ -293,7 +293,7 @@ public:
     }
 
     // Dynamically expand buffer count
-    bool TryExpand() {
+    bool try_expand() {
         if (current_buffer_count_ >= kMaxBufferCount) {
             return false;
         }
@@ -305,19 +305,19 @@ public:
 
         auto* buf = new AppendBuffer(mem, buffer_size_);
         all_buffers_.push_back(buf);
-        complete_ring_.Enqueue(buf);
+        complete_ring_.enqueue(buf);
         current_buffer_count_++;
 
         if (active_buffer_ == nullptr) {
-            complete_ring_.Dequeue(&active_buffer_);
+            complete_ring_.dequeue(&active_buffer_);
         }
 
         return true;
     }
 
     // Backpressure management
-    bool CheckBackpressure() {
-        size_t pending = PendingCount();
+    bool check_backpressure() {
+        size_t pending = pending_count();
 
         if (backpressure_active_) {
             if (pending <= kBackpressureLowWater) {
@@ -325,7 +325,7 @@ public:
             }
         } else {
             if (pending >= kBackpressureHighWater) {
-                if (!TryExpand()) {
+                if (!try_expand()) {
                     backpressure_active_ = true;
                 }
             }
@@ -333,28 +333,28 @@ public:
         return backpressure_active_;
     }
 
-    bool IsBackpressureActive() const { return backpressure_active_; }
-    size_t PendingCount() const { return submit_ring_.Count(); }
+    bool is_backpressure_active() const { return backpressure_active_; }
+    size_t pending_count() const { return submit_ring_.count(); }
 
-    AppendBuffer* GetActiveBuffer() { return active_buffer_; }
-    uint32_t CurrentBufferEpoch() const { return active_buffer_ ? active_buffer_->Epoch() : 0; }
+    AppendBuffer* get_active_buffer() { return active_buffer_; }
+    uint32_t current_buffer_epoch() const { return active_buffer_ ? active_buffer_->epoch() : 0; }
 
-    size_t CurrentEntryCount() const { return active_buffer_ ? active_buffer_->EntryCount() : 0; }
+    size_t current_entry_count() const { return active_buffer_ ? active_buffer_->entry_count() : 0; }
 
     // Register a callback to be invoked when backpressure is relieved
-    void RegisterResumeCallback(BackpressureCallback cb, void* arg) {
-        resume_callbacks_.Enqueue({cb, arg});
+    void register_resume_callback(BackpressureCallback cb, void* arg) {
+        resume_callbacks_.enqueue({cb, arg});
     }
 
     // Check and fire resume notifications on backpressure transition
-    void ProcessResumeNotifications() {
+    void process_resume_notifications() {
         if (!was_backpressure_active_ && !backpressure_active_) {
             return;
         }
 
         if (was_backpressure_active_ && !backpressure_active_) {
             ResumeNotification notification;
-            while (resume_callbacks_.Dequeue(&notification)) {
+            while (resume_callbacks_.dequeue(&notification)) {
                 notification.callback(notification.arg);
             }
         }
@@ -367,13 +367,13 @@ public:
     public:
         explicit RdmaFlowController(AppendBufferManager* mgr) : buffer_mgr_(mgr) {}
 
-        bool CanAcceptRequest() { return !buffer_mgr_->IsBackpressureActive(); }
+        bool can_accept_request() { return !buffer_mgr_->is_backpressure_active(); }
 
-        bool TryProcessOrDefer(void* rdma_ctx, BackpressureCallback on_resume) {
-            if (CanAcceptRequest()) {
+        bool try_process_or_defer(void* rdma_ctx, BackpressureCallback on_resume) {
+            if (can_accept_request()) {
                 return true;
             }
-            buffer_mgr_->RegisterResumeCallback(on_resume, rdma_ctx);
+            buffer_mgr_->register_resume_callback(on_resume, rdma_ctx);
             return false;
         }
 
@@ -381,14 +381,14 @@ public:
         AppendBufferManager* buffer_mgr_;
     };
 
-    RdmaFlowController* CreateFlowController() { return new RdmaFlowController(this); }
+    RdmaFlowController* create_flow_controller() { return new RdmaFlowController(this); }
 
 private:
-    void* Reserve(size_t len) {
-        if (active_buffer_ == nullptr || active_buffer_->Used() + len > kFlushThreshold) {
+    void* reserve(size_t len) {
+        if (active_buffer_ == nullptr || active_buffer_->used() + len > kFlushThreshold) {
             return nullptr;
         }
-        return active_buffer_->Reserve(len);
+        return active_buffer_->reserve(len);
     }
 
     struct ResumeNotification {

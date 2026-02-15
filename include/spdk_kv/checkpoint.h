@@ -23,7 +23,7 @@ struct CheckpointTrigger {
     // Periodic trigger (default 300 seconds)
     uint64_t interval_ns = 300ULL * 1000 * 1000 * 1000;
 
-    // Write amount trigger (default 10GB)
+    // write amount trigger (default 10GB)
     uint64_t bytes_threshold = 10ULL * 1024 * 1024 * 1024;
 
     // Dirty segment count trigger (default 8, about 10%)
@@ -36,7 +36,7 @@ struct CheckpointTrigger {
     uint64_t bytes_since_last_checkpoint = 0;
 
     // Check if checkpoint should be triggered
-    bool ShouldCheckpoint(size_t dirty_segment_count, uint64_t current_time_ns) const {
+    bool should_checkpoint(size_t dirty_segment_count, uint64_t current_time_ns) const {
         if (current_time_ns - last_checkpoint_time_ns >= interval_ns) {
             return true;
         }
@@ -49,14 +49,14 @@ struct CheckpointTrigger {
         return false;
     }
 
-    // Reset counters after checkpoint
-    void Reset(uint64_t current_time_ns) {
+    // reset counters after checkpoint
+    void reset(uint64_t current_time_ns) {
         last_checkpoint_time_ns = current_time_ns;
         bytes_since_last_checkpoint = 0;
     }
 
     // Update bytes written
-    void AddBytes(uint64_t bytes) { bytes_since_last_checkpoint += bytes; }
+    void add_bytes(uint64_t bytes) { bytes_since_last_checkpoint += bytes; }
 };
 
 // Checkpoint callback type
@@ -91,64 +91,64 @@ public:
     IncrementalCheckpoint& operator=(const IncrementalCheckpoint&) = delete;
 
     // Mark a segment as dirty (called when index is modified)
-    void MarkDirty(uint64_t bucket_index);
+    void mark_dirty(uint64_t bucket_index);
 
-    // Get dirty segment count
-    size_t DirtySegmentCount() const { return dirty_segments_.count(); }
+    // get dirty segment count
+    size_t dirty_segment_count() const { return dirty_segments_.count(); }
 
     // Check if any segment is dirty
-    bool HasDirtySegments() const { return dirty_segments_.any(); }
+    bool has_dirty_segments() const { return dirty_segments_.any(); }
 
     // Snapshot dirty segments (for COW during checkpoint)
-    std::bitset<kMemIndexSegmentCount> SnapshotDirtySegments() const { return dirty_segments_; }
+    std::bitset<kMemIndexSegmentCount> snapshot_dirty_segments() const { return dirty_segments_; }
 
-    // Start async checkpoint
-    void StartCheckpoint(CheckpointCallback callback);
+    // start async checkpoint
+    void start_checkpoint(CheckpointCallback callback);
 
-    // Poll checkpoint progress (call in main loop)
+    // poll checkpoint progress (call in main loop)
     // Returns true if checkpoint is in progress
-    bool Poll();
+    bool poll();
 
     // Check if checkpoint is in progress
-    bool IsInProgress() const { return state_ != State::kIdle; }
+    bool is_in_progress() const { return state_ != State::kIdle; }
 
-    // Get current state
-    State GetState() const { return state_; }
+    // get current state
+    State get_state() const { return state_; }
 
-    // Get checkpoint sequence (increments after each successful checkpoint)
-    uint64_t GetCheckpointSequence() const { return checkpoint_sequence_; }
+    // get checkpoint sequence (increments after each successful checkpoint)
+    uint64_t get_checkpoint_sequence() const { return checkpoint_sequence_; }
 
-    // Set global sequence for snapshot
-    void SetGlobalSequence(uint32_t seq) { global_sequence_ = seq; }
-    uint32_t GetGlobalSequence() const { return global_sequence_; }
+    // set global sequence for snapshot
+    void set_global_sequence(uint32_t seq) { global_sequence_ = seq; }
+    uint32_t get_global_sequence() const { return global_sequence_; }
 
-    // Get/Set active buffer positions (for recovery)
-    void SetActiveBufferPositions(const ActiveBufferPos* positions, uint8_t count);
-    const ActiveBufferPos* GetActiveBufferPositions() const { return active_buffer_positions_; }
-    uint8_t GetActiveBufferCount() const { return active_buffer_count_; }
+    // get/set active buffer positions (for recovery)
+    void set_active_buffer_positions(const ActiveBufferPos* positions, uint8_t count);
+    const ActiveBufferPos* get_active_buffer_positions() const { return active_buffer_positions_; }
+    uint8_t get_active_buffer_count() const { return active_buffer_count_; }
 
-    // Set AppendBufferManager for active buffer position snapshot
-    void SetAppendBufferManager(AppendBufferManager* mgr) { buffer_manager_ = mgr; }
+    // set AppendBufferManager for active buffer position snapshot
+    void set_append_buffer_manager(AppendBufferManager* mgr) { buffer_manager_ = mgr; }
 
-    // Set superblock update callback (called after sync to persist checkpoint atomically)
-    void SetSuperblockUpdateCallback(SuperblockUpdateCallback cb) {
+    // set superblock update callback (called after sync to persist checkpoint atomically)
+    void set_superblock_update_callback(SuperblockUpdateCallback cb) {
         superblock_update_cb_ = std::move(cb);
     }
 
-    // Set SPDK resources for real IO
-    void SetSpdkResources(spdk_blob* mem_index_blob, spdk_io_channel* channel,
+    // set SPDK resources for real IO
+    void set_spdk_resources(spdk_blob* mem_index_blob, spdk_io_channel* channel,
                           spdk_blob_store* blobstore);
 
-    // Serialize a segment to buffer
+    // serialize a segment to buffer
     // Returns bytes written, or 0 on error
-    size_t SerializeSegment(uint32_t segment_id, void* buffer, size_t buffer_size);
+    size_t serialize_segment(uint32_t segment_id, void* buffer, size_t buffer_size);
 
-    // Deserialize a segment from buffer
-    bool DeserializeSegment(uint32_t segment_id, const void* buffer, size_t data_size);
+    // deserialize a segment from buffer
+    bool deserialize_segment(uint32_t segment_id, const void* buffer, size_t data_size);
 
 private:
     // Snapshot active buffer positions from AppendBufferManager
-    void SnapshotActiveBufferPositions();
+    void snapshot_active_buffer_positions();
 
     // Segment write completion context (moved from local scope for pooling)
     struct SegmentWriteCtx {
@@ -157,14 +157,14 @@ private:
     };
 
     // Internal helpers
-    void ProcessNextSegment();
-    void OnSegmentWritten(int status);
-    void OnSyncComplete(int status);
-    void OnSuperblockUpdated(int status);
-    void CompleteCheckpoint(int status);
+    void process_next_segment();
+    void on_segment_written(int status);
+    void on_sync_complete(int status);
+    void on_superblock_updated(int status);
+    void complete_checkpoint(int status);
 
-    // Clear dirty flags
-    void ClearDirtyFlags() { dirty_segments_.reset(); }
+    // clear dirty flags
+    void clear_dirty_flags() { dirty_segments_.reset(); }
 
     // Members
     MemIndex* mem_index_;

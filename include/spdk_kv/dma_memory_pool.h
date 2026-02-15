@@ -33,13 +33,13 @@ public:
               numa_node_(numa_node) {
 #ifdef __linux__
         if (numa_node_ < 0) {
-            numa_node_ = GetCurrentNumaNode();
+            numa_node_ = get_current_numa_node();
         }
 #endif
 
         // Allocate NUMA-local DMA memory
         size_t total_size = block_size_ * block_count_;
-        pool_base_ = AllocateNumaMemory(total_size, numa_node_);
+        pool_base_ = allocate_numa_memory(total_size, numa_node_);
 
         if (!pool_base_) {
             // Fallback to standard SPDK allocation
@@ -54,10 +54,10 @@ public:
         }
 
         if (!pool_base_) {
-            return;  // Caller should check IsValid()
+            return;  // Caller should check is_valid()
         }
 
-        // Initialize free list
+        // initialize free list
         free_list_.reserve(block_count_);
         for (size_t i = 0; i < block_count_; i++) {
             free_list_.push_back(static_cast<char*>(pool_base_) + i * block_size_);
@@ -65,7 +65,7 @@ public:
     }
 
     ~DmaMemoryPool() {
-        FreeNumaMemory(pool_base_, block_size_ * block_count_);
+        free_numa_memory(pool_base_, block_size_ * block_count_);
     }
 
     // Non-copyable
@@ -73,10 +73,10 @@ public:
     DmaMemoryPool& operator=(const DmaMemoryPool&) = delete;
 
     // Check if pool was initialized successfully
-    bool IsValid() const { return pool_base_ != nullptr; }
+    bool is_valid() const { return pool_base_ != nullptr; }
 
     // Allocate one block from the pool
-    void* Alloc() {
+    void* alloc() {
         if (free_list_.empty()) {
             return nullptr;
         }
@@ -86,22 +86,22 @@ public:
     }
 
     // Return a block to the pool
-    void Free(void* ptr) {
+    void free(void* ptr) {
         if (ptr) {
             free_list_.push_back(ptr);
         }
     }
 
     // Accessors
-    size_t BlockSize() const { return block_size_; }
-    size_t Available() const { return free_list_.size(); }
-    size_t TotalBlocks() const { return block_count_; }
-    int NumaNode() const { return numa_node_; }
-    void* PoolBase() const { return pool_base_; }
-    size_t PoolSize() const { return block_size_ * block_count_; }
+    size_t block_size() const { return block_size_; }
+    size_t available() const { return free_list_.size(); }
+    size_t total_blocks() const { return block_count_; }
+    int numa_node() const { return numa_node_; }
+    void* pool_base() const { return pool_base_; }
+    size_t pool_size() const { return block_size_ * block_count_; }
 
 private:
-    static int GetCurrentNumaNode() {
+    static int get_current_numa_node() {
 #ifdef __linux__
         return numa_node_of_cpu(sched_getcpu());
 #else
@@ -109,7 +109,7 @@ private:
 #endif
     }
 
-    static void* AllocateNumaMemory(size_t size, int numa_node) {
+    static void* allocate_numa_memory(size_t size, int numa_node) {
         void* ptr = spdk_dma_malloc_socket(size, kPageSize, nullptr, numa_node);
 
 #ifdef __linux__
@@ -123,7 +123,7 @@ private:
         return ptr;
     }
 
-    static void FreeNumaMemory(void* ptr, size_t /*size*/) {
+    static void free_numa_memory(void* ptr, size_t /*size*/) {
         if (ptr) {
             spdk_dma_free(ptr);
         }
@@ -140,7 +140,7 @@ private:
 class EngineThread {
 public:
     // Pin current thread to a specific CPU core
-    static bool PinToCore(int core_id) {
+    static bool pin_to_core(int core_id) {
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(core_id, &cpuset);
@@ -151,7 +151,7 @@ public:
         }
 
 #ifdef __linux__
-        // Set memory allocation policy to local NUMA node
+        // set memory allocation policy to local NUMA node
         int numa_node = numa_node_of_cpu(core_id);
         numa_set_preferred(numa_node);
 #endif
@@ -159,8 +159,8 @@ public:
         return true;
     }
 
-    // Get NUMA node for a given CPU core
-    static int GetNumaNode(int core_id) {
+    // get NUMA node for a given CPU core
+    static int get_numa_node(int core_id) {
 #ifdef __linux__
         return numa_node_of_cpu(core_id);
 #else
@@ -169,13 +169,13 @@ public:
 #endif
     }
 
-    // Get current CPU core
-    static int GetCurrentCore() {
+    // get current CPU core
+    static int get_current_core() {
         return sched_getcpu();
     }
 
-    // Get NUMA node of current thread
-    static int GetCurrentNumaNode() {
+    // get NUMA node of current thread
+    static int get_current_numa_node() {
 #ifdef __linux__
         return numa_node_of_cpu(sched_getcpu());
 #else
@@ -198,13 +198,13 @@ struct MemoryPools {
     DmaMemoryPool small_pool;
 
     explicit MemoryPools(int core_id)
-            : numa_node(EngineThread::GetNumaNode(core_id)),
+            : numa_node(EngineThread::get_numa_node(core_id)),
               append_pool(2 * 1024 * 1024, 4, numa_node),
               read_pool(64 * 1024, 256, numa_node),
               small_pool(4 * 1024, 1024, numa_node) {}
 
-    bool IsValid() const {
-        return append_pool.IsValid() && read_pool.IsValid() && small_pool.IsValid();
+    bool is_valid() const {
+        return append_pool.is_valid() && read_pool.is_valid() && small_pool.is_valid();
     }
 };
 
@@ -224,16 +224,16 @@ public:
     RefCountedBuffer& operator=(const RefCountedBuffer&) = delete;
 
     // Increment reference count
-    void AddRef() {
+    void add_ref() {
         ref_count_.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Decrement reference count; returns true if buffer was freed
-    bool Release() {
+    bool release() {
         if (ref_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             // Last reference: return buffer to pool
             if (pool_) {
-                pool_->Free(data_);
+                pool_->free(data_);
             }
             delete this;
             return true;
@@ -241,13 +241,13 @@ public:
         return false;
     }
 
-    void* Data() { return data_; }
-    const void* Data() const { return data_; }
-    size_t Size() const { return size_; }
-    int RefCount() const { return ref_count_.load(std::memory_order_relaxed); }
+    void* data() { return data_; }
+    const void* data() const { return data_; }
+    size_t size() const { return size_; }
+    int ref_count() const { return ref_count_.load(std::memory_order_relaxed); }
 
 private:
-    ~RefCountedBuffer() = default;  // Only Release() can destroy
+    ~RefCountedBuffer() = default;  // Only release() can destroy
 
     void* data_;
     size_t size_;

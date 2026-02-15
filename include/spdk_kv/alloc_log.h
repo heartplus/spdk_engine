@@ -28,59 +28,59 @@ public:
     AllocLogManager(const AllocLogManager&) = delete;
     AllocLogManager& operator=(const AllocLogManager&) = delete;
 
-    // Initialize with SPDK resources and persisted state from superblock
-    void Initialize(spdk_blob* superblock_blob, spdk_io_channel* channel,
+    // initialize with SPDK resources and persisted state from superblock
+    void initialize(spdk_blob* superblock_blob, spdk_io_channel* channel,
                     spdk_blob_store* blobstore, uint32_t head, uint32_t tail,
                     uint32_t sequence);
 
-    // Write a new allocation log entry (async)
+    // write a new allocation log entry (async)
     // The entry is written to the in-memory page, then the 4KB page is flushed to NVMe.
     // Callback is invoked after the page write completes.
-    void WriteEntry(uint64_t blob_id, uint16_t file_id, uint64_t file_size,
+    void write_entry(uint64_t blob_id, uint16_t file_id, uint64_t file_size,
                     std::function<void(int status)> callback);
 
     // Load valid entries from disk during recovery.
     // Scans from head forward, validating CRC and sequence monotonicity.
     // Only returns entries with sequence > checkpoint_sequence (post-checkpoint entries).
-    void LoadEntries(uint32_t checkpoint_sequence,
+    void load_entries(uint32_t checkpoint_sequence,
                      std::function<void(int status, const std::vector<AllocLogEntry>& entries)>
                              callback);
 
-    // Reclaim all entries (called after checkpoint persists file_mappings).
+    // reclaim all entries (called after checkpoint persists file_mappings).
     // Advances head to tail, logically emptying the log.
-    void Reclaim();
+    void reclaim();
 
     // Check if near full (should trigger checkpoint before next alloc)
-    bool IsNearFull() const;
+    bool is_near_full() const;
 
     // Check if completely full
-    bool IsFull() const;
+    bool is_full() const;
 
-    // Get used entry count
-    uint32_t UsedCount() const { return tail_ - head_; }
+    // get used entry count
+    uint32_t used_count() const { return tail_ - head_; }
 
     // Getters for superblock persistence
-    uint32_t GetHead() const { return head_; }
-    uint32_t GetTail() const { return tail_; }
-    uint32_t GetSequence() const { return sequence_; }
+    uint32_t get_head() const { return head_; }
+    uint32_t get_tail() const { return tail_; }
+    uint32_t get_sequence() const { return sequence_; }
 
     // Check if initialized
-    bool IsInitialized() const { return initialized_; }
+    bool is_initialized() const { return initialized_; }
 
-    // Write completion context (moved from local scope for pooling)
+    // write completion context (moved from local scope for pooling)
     struct AllocLogWriteCtx {
         std::function<void(int)> callback;
         AllocLogManager* mgr;
     };
 
 private:
-    // Extracted static callback for LoadEntries async read
+    // Extracted static callback for load_entries async read
     struct LoadEntriesReadCtx {
         AllocLogManager* mgr;
         uint32_t checkpoint_seq;
         std::function<void(int, const std::vector<AllocLogEntry>&)> callback;
     };
-    static void OnAllocLogPageRead(void* arg, int bserrno);
+    static void on_alloc_log_page_read(void* arg, int bserrno);
 
     // SPDK resources
     spdk_blob* superblock_blob_;

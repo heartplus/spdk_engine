@@ -11,13 +11,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 5. 假定value的平均长度大于4KB
 6. 不允许写入长度为0的数据
 
-## Development Status
+## 修改规范
 
-This repository is currently empty and in initial setup phase. This file should be updated once the project structure is established with:
 - build with cmake
-- use .clang-format for c++ code style
 - make sure compile pass
 - no simulation
+- 编码规范参考google c++ 编码规范，但是函数命名采用snake_case
 
 ## Common Development Considerations
 

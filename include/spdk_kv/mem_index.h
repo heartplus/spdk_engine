@@ -28,7 +28,7 @@ namespace spdk_kv {
 // Simple xxhash64-like implementation for hashing
 class HashUtil {
 public:
-    static uint64_t Hash(uint64_t key) {
+    static uint64_t hash(uint64_t key) {
         // FNV-1a style hash for simplicity
         uint64_t hash = 14695981039346656037ULL;
         for (int i = 0; i < 8; i++) {
@@ -38,8 +38,8 @@ public:
         return hash;
     }
 
-    static void ComputeHash(uint64_t key, uint64_t* hash, uint8_t* tag) {
-        *hash = Hash(key);
+    static void compute_hash(uint64_t key, uint64_t* hash, uint8_t* tag) {
+        *hash = HashUtil::hash(key);
         *tag = static_cast<uint8_t>((*hash >> 56) & 0xFF);
     }
 };
@@ -47,7 +47,7 @@ public:
 // Runtime SIMD capability detection
 class SIMDCapability {
 public:
-    static bool HasAvx2() {
+    static bool has_avx2() {
 #ifdef __x86_64__
         static bool checked = false;
         static bool supported = false;
@@ -68,9 +68,9 @@ public:
 // Memory index using Robin Hood Hashing
 class MemIndex {
 public:
-    // Create index with specified capacity (standard allocation)
+    // create index with specified capacity (standard allocation)
     explicit MemIndex(uint64_t max_entries, double load_factor = kDefaultLoadFactor)
-            : capacity_(NextPowerOf2(static_cast<uint64_t>(max_entries / load_factor))),
+            : capacity_(next_power_of_2(static_cast<uint64_t>(max_entries / load_factor))),
               size_(0),
               global_sequence_(0),
               numa_node_(-1),
@@ -90,10 +90,10 @@ public:
         psl_ = static_cast<uint8_t*>(std::calloc(capacity_, 1));
     }
 
-    // Create index with hugepage allocation and NUMA affinity
+    // create index with hugepage allocation and NUMA affinity
     MemIndex(uint64_t max_entries, double load_factor, int numa_node,
              HugePageAllocator::WarmupMode warmup = HugePageAllocator::WarmupMode::SYNC)
-            : capacity_(NextPowerOf2(static_cast<uint64_t>(max_entries / load_factor))),
+            : capacity_(next_power_of_2(static_cast<uint64_t>(max_entries / load_factor))),
               size_(0),
               global_sequence_(0),
               numa_node_(numa_node),
@@ -107,7 +107,7 @@ public:
         size_t total_size = entries_size + psl_size;
 
         // Use hugepage allocator with fallback chain
-        auto result = MemIndexAllocator::AllocateIndexMemory(total_size, numa_node, warmup);
+        auto result = MemIndexAllocator::allocate_index_memory(total_size, numa_node, warmup);
         if (result.ptr) {
             alloc_base_ = result.ptr;
             alloc_size_ = total_size;
@@ -121,7 +121,7 @@ public:
     ~MemIndex() {
         if (alloc_base_) {
             // Hugepage allocation: single block covers both entries_ and psl_
-            MemIndexAllocator::FreeIndexMemory(alloc_base_, alloc_size_, alloc_method_);
+            MemIndexAllocator::free_index_memory(alloc_base_, alloc_size_, alloc_method_);
         } else {
             // Standard allocation: separate blocks
             if (entries_) {
@@ -137,26 +137,26 @@ public:
     MemIndex(const MemIndex&) = delete;
     MemIndex& operator=(const MemIndex&) = delete;
 
-    // Find entry by key
-    MemIndexEntry* Find(uint64_t key) {
+    // find entry by key
+    MemIndexEntry* find(uint64_t key) {
         if (!entries_ || !psl_) {
             return nullptr;
         }
 
         uint64_t hash;
         uint8_t tag;
-        HashUtil::ComputeHash(key, &hash, &tag);
+        HashUtil::compute_hash(key, &hash, &tag);
 
         uint64_t idx = hash & (capacity_ - 1);
 
         // Prefetch hash bucket
         __builtin_prefetch(&entries_[idx], 0, 3);
 
-        return FindInternal(key, idx, tag);
+        return find_internal(key, idx, tag);
     }
 
     // Batch find with prefetch pipeline
-    void BatchFind(const uint64_t* keys, size_t count, MemIndexEntry** results) {
+    void batch_find(const uint64_t* keys, size_t count, MemIndexEntry** results) {
         if (!entries_ || !psl_ || !keys || !results) {
             for (size_t i = 0; i < count; i++) {
                 results[i] = nullptr;
@@ -181,7 +181,7 @@ public:
 
         for (size_t i = 0; i < count; i++) {
             uint64_t hash;
-            HashUtil::ComputeHash(keys[i], &hash, &tags[i]);
+            HashUtil::compute_hash(keys[i], &hash, &tags[i]);
             indices[i] = hash & (capacity_ - 1);
         }
 
@@ -196,7 +196,7 @@ public:
                 __builtin_prefetch(&entries_[indices[i + kPrefetchDistance]], 0, 3);
             }
 
-            results[i] = FindInternal(keys[i], indices[i], tags[i]);
+            results[i] = find_internal(keys[i], indices[i], tags[i]);
         }
 
         if (count > kStackLimit) {
@@ -207,14 +207,14 @@ public:
 
 #ifdef __AVX2__
     // AVX2 accelerated find (compares 4 entries at once via tag matching)
-    MemIndexEntry* FindAvx2(uint64_t key) {
+    MemIndexEntry* find_avx2(uint64_t key) {
         if (!entries_ || !psl_) {
             return nullptr;
         }
 
         uint64_t hash;
         uint8_t tag;
-        HashUtil::ComputeHash(key, &hash, &tag);
+        HashUtil::compute_hash(key, &hash, &tag);
 
         uint64_t idx = hash & (capacity_ - 1);
 
@@ -276,7 +276,7 @@ public:
     }
 
     // AVX2 batch find with prefetch
-    void BatchFindAvx2(const uint64_t* keys, size_t count, MemIndexEntry** results) {
+    void batch_find_avx2(const uint64_t* keys, size_t count, MemIndexEntry** results) {
         if (!entries_ || !psl_ || !keys || !results) {
             for (size_t i = 0; i < count; i++) {
                 results[i] = nullptr;
@@ -294,7 +294,7 @@ public:
             alignas(32) uint8_t tags[kBatchSize];
 
             for (size_t i = 0; i < batch_count; i++) {
-                HashUtil::ComputeHash(keys[batch_start + i], &hashes[i], &tags[i]);
+                HashUtil::compute_hash(keys[batch_start + i], &hashes[i], &tags[i]);
             }
 
             for (size_t i = 0; i < batch_count; i++) {
@@ -302,31 +302,31 @@ public:
                 __builtin_prefetch(&entries_[idx], 0, 3);
             }
 
-            // Dispatch each to FindAvx2
+            // Dispatch each to find_avx2
             for (size_t i = 0; i < batch_count; i++) {
-                results[batch_start + i] = FindAvx2(keys[batch_start + i]);
+                results[batch_start + i] = find_avx2(keys[batch_start + i]);
             }
         }
     }
 
 #else
     // Non-AVX2 fallback: delegate to scalar implementations
-    MemIndexEntry* FindAvx2(uint64_t key) { return Find(key); }
+    MemIndexEntry* find_avx2(uint64_t key) { return find(key); }
 
-    void BatchFindAvx2(const uint64_t* keys, size_t count, MemIndexEntry** results) {
-        BatchFind(keys, count, results);
+    void batch_find_avx2(const uint64_t* keys, size_t count, MemIndexEntry** results) {
+        batch_find(keys, count, results);
     }
 #endif
 
     // Insert or update entry (Robin Hood Hashing)
-    bool Upsert(uint64_t key, const MemIndexEntry& new_entry) {
+    bool upsert(uint64_t key, const MemIndexEntry& new_entry) {
         if (!entries_ || !psl_) {
             return false;
         }
 
         uint64_t hash;
         uint8_t tag;
-        HashUtil::ComputeHash(key, &hash, &tag);
+        HashUtil::compute_hash(key, &hash, &tag);
 
         uint64_t idx = hash & (capacity_ - 1);
         uint8_t dist = 0;
@@ -346,7 +346,7 @@ public:
             // Found same key, update
             if (entries_[idx].key == key) {
                 // Only update if new sequence is newer
-                if (SequenceNewer(entry_to_insert.sequence, entries_[idx].sequence)) {
+                if (sequence_newer(entry_to_insert.sequence, entries_[idx].sequence)) {
                     entries_[idx] = entry_to_insert;
                 }
                 return true;
@@ -370,8 +370,8 @@ public:
     }
 
     // Mark entry as deleted
-    bool Remove(uint64_t key) {
-        MemIndexEntry* entry = Find(key);
+    bool remove(uint64_t key) {
+        MemIndexEntry* entry = find(key);
         if (entry) {
             entry->deleted = 1;
             return true;
@@ -380,30 +380,30 @@ public:
     }
 
     // Allocate new sequence number
-    uint32_t AllocateSequence() { return ++global_sequence_; }
+    uint32_t allocate_sequence() { return ++global_sequence_; }
 
-    // Set global sequence (for recovery)
-    void SetGlobalSequence(uint32_t seq) { global_sequence_ = seq; }
+    // set global sequence (for recovery)
+    void set_global_sequence(uint32_t seq) { global_sequence_ = seq; }
 
-    // Get global sequence
-    uint32_t GetGlobalSequence() const { return global_sequence_; }
+    // get global sequence
+    uint32_t get_global_sequence() const { return global_sequence_; }
 
     // Compare sequences (handles 32-bit wraparound)
-    static bool SequenceNewer(uint32_t a, uint32_t b) { return static_cast<int32_t>(a - b) > 0; }
+    static bool sequence_newer(uint32_t a, uint32_t b) { return static_cast<int32_t>(a - b) > 0; }
 
     // Statistics
-    uint64_t Size() const { return size_; }
-    uint64_t Capacity() const { return capacity_; }
-    double LoadFactor() const { return static_cast<double>(size_) / capacity_; }
+    uint64_t size() const { return size_; }
+    uint64_t capacity() const { return capacity_; }
+    double load_factor() const { return static_cast<double>(size_) / capacity_; }
 
     // Access internals (for serialization)
-    MemIndexEntry* Entries() { return entries_; }
-    const MemIndexEntry* Entries() const { return entries_; }
-    uint8_t* Psl() { return psl_; }
-    const uint8_t* Psl() const { return psl_; }
+    MemIndexEntry* entries() { return entries_; }
+    const MemIndexEntry* entries() const { return entries_; }
+    uint8_t* psl() { return psl_; }
+    const uint8_t* psl() const { return psl_; }
 
     // Rebuild PSL array (after memory dump load)
-    void RebuildPslArray() {
+    void rebuild_psl_array() {
         std::memset(psl_, 0, capacity_);
         size_ = 0;
 
@@ -411,10 +411,10 @@ public:
             if (!entries_[i].is_empty()) {
                 uint64_t hash;
                 uint8_t tag;
-                HashUtil::ComputeHash(entries_[i].key, &hash, &tag);
+                HashUtil::compute_hash(entries_[i].key, &hash, &tag);
                 uint64_t ideal_idx = hash & (capacity_ - 1);
 
-                // Calculate actual distance
+                // calculate actual distance
                 uint64_t distance =
                         (i >= ideal_idx) ? (i - ideal_idx) : (capacity_ - ideal_idx + i);
                 psl_[i] = static_cast<uint8_t>(distance + 1);  // PSL starts from 1
@@ -426,10 +426,10 @@ public:
         }
     }
 
-    // Serialize the full MemIndex to buffer (for non-incremental full checkpoint)
+    // serialize the full MemIndex to buffer (for non-incremental full checkpoint)
     // Returns bytes written, or 0 on error.
     // Format: SerializedMemIndexHeader + compact entries (only non-empty entries)
-    size_t Serialize(void* buffer, size_t buf_size) {
+    size_t serialize(void* buffer, size_t buf_size) {
         if (!entries_ || !psl_ || !buffer) {
             return 0;
         }
@@ -462,20 +462,20 @@ public:
 
         output->entry_count = count;
 
-        // Calculate checksum over entry data
+        // calculate checksum over entry data
         size_t data_size = count * sizeof(MemIndexEntry);
         output->checksum =
-                Crc32::Calculate(static_cast<char*>(buffer) + header_size, data_size);
+                Crc32::calculate(static_cast<char*>(buffer) + header_size, data_size);
 
         std::memset(output->padding, 0, sizeof(output->padding));
 
         return header_size + data_size;
     }
 
-    // Deserialize compact entries from buffer into this MemIndex via upsert.
+    // deserialize compact entries from buffer into this MemIndex via upsert.
     // Returns number of entries loaded, or 0 on error.
     // Uses batch prefetch for performance optimization.
-    size_t Deserialize(const void* buffer, size_t data_size) {
+    size_t deserialize(const void* buffer, size_t data_size) {
         if (!entries_ || !psl_ || !buffer || data_size < sizeof(SerializedMemIndexHeader)) {
             return 0;
         }
@@ -491,7 +491,7 @@ public:
         size_t entry_data_size = data_size - sizeof(SerializedMemIndexHeader);
         const char* entry_data =
                 static_cast<const char*>(buffer) + sizeof(SerializedMemIndexHeader);
-        uint32_t computed = Crc32::Calculate(entry_data, entry_data_size);
+        uint32_t computed = Crc32::calculate(entry_data, entry_data_size);
         if (computed != header->checksum) {
             return 0;
         }
@@ -509,7 +509,7 @@ public:
             // Prefetch next batch
             for (size_t j = 0; j < kBatchSize && i + j + kBatchSize < count; j++) {
                 uint64_t key = entries[i + j + kBatchSize].key;
-                uint64_t hash = HashUtil::Hash(key);
+                uint64_t hash = HashUtil::hash(key);
                 uint64_t idx = hash & (capacity_ - 1);
                 __builtin_prefetch(&entries_[idx], 1, 3);
             }
@@ -518,7 +518,7 @@ public:
             for (size_t j = 0; j < kBatchSize && i + j < count; j++) {
                 const MemIndexEntry& src = entries[i + j];
                 if (!src.is_deleted()) {
-                    Upsert(src.key, src);
+                    upsert(src.key, src);
                 }
             }
         }
@@ -530,7 +530,7 @@ public:
     }
 
     // Mark segment as dirty (for incremental checkpoint)
-    void MarkDirty(uint64_t bucket_index) {
+    void mark_dirty(uint64_t bucket_index) {
         uint32_t segment_id =
                 static_cast<uint32_t>(bucket_index / (capacity_ / kMemIndexSegmentCount));
         if (segment_id < kMemIndexSegmentCount) {
@@ -539,22 +539,22 @@ public:
     }
 
     // Check if segment is dirty
-    bool IsSegmentDirty(uint32_t segment_id) const {
+    bool is_segment_dirty(uint32_t segment_id) const {
         return segment_id < kMemIndexSegmentCount && dirty_segments_.test(segment_id);
     }
 
-    // Clear all dirty flags
-    void ClearDirtyFlags() { dirty_segments_.reset(); }
+    // clear all dirty flags
+    void clear_dirty_flags() { dirty_segments_.reset(); }
 
-    // Get dirty segment count
-    size_t DirtySegmentCount() const { return dirty_segments_.count(); }
+    // get dirty segment count
+    size_t dirty_segment_count() const { return dirty_segments_.count(); }
 
     // Snapshot dirty segments
-    std::bitset<kMemIndexSegmentCount> SnapshotDirtySegments() const { return dirty_segments_; }
+    std::bitset<kMemIndexSegmentCount> snapshot_dirty_segments() const { return dirty_segments_; }
 
 private:
     // Core probing logic (no hash computation)
-    MemIndexEntry* FindInternal(uint64_t key, uint64_t idx, uint8_t tag) {
+    MemIndexEntry* find_internal(uint64_t key, uint64_t idx, uint8_t tag) {
         uint8_t dist = 0;
 
         while (true) {
@@ -584,7 +584,7 @@ private:
         }
     }
 
-    static uint64_t NextPowerOf2(uint64_t n) {
+    static uint64_t next_power_of_2(uint64_t n) {
         n--;
         n |= n >> 1;
         n |= n >> 2;

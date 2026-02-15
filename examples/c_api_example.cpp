@@ -17,7 +17,7 @@ int main() {
     spdk_kv_handle handle = nullptr;
     int ret;
 
-    // Create options
+    // create options
     struct spdk_kv_create_opts create_opts;
     memset(&create_opts, 0, sizeof(create_opts));
     create_opts.max_capacity = 8ULL * 1024 * 1024 * 1024 * 1024;  // 8TB
@@ -26,7 +26,7 @@ int main() {
     create_opts.index_load_factor = 0.55;
     create_opts.force = 0;
 
-    // Create engine
+    // create engine
     printf("Creating engine...\n");
     ret = spdk_kv_create("/tmp/spdk_kv_c_test", &create_opts, &handle);
     if (ret != 0) {
@@ -35,8 +35,8 @@ int main() {
     }
     printf("Engine created!\n\n");
 
-    // Put some values
-    printf("--- Put Operations ---\n");
+    // put some values
+    printf("--- put Operations ---\n");
     for (int i = 1; i <= 10; i++) {
         char value[64];
         snprintf(value, sizeof(value), "c_value_%d", i);
@@ -44,36 +44,36 @@ int main() {
         ret = spdk_kv_put(handle, static_cast<uint64_t>(i), value,
                           static_cast<uint32_t>(strlen(value)));
         if (ret != 0) {
-            fprintf(stderr, "Put failed for key %d: %d\n", i, ret);
+            fprintf(stderr, "put failed for key %d: %d\n", i, ret);
             spdk_kv_close(handle);
             return 1;
         }
-        printf("Put key %d: %s\n", i, value);
+        printf("put key %d: %s\n", i, value);
     }
     printf("\n");
 
-    // Get some values
-    printf("--- Get Operations ---\n");
+    // get some values
+    printf("--- get Operations ---\n");
     for (int i = 1; i <= 10; i++) {
         char buffer[256];
         uint32_t actual_len = 0;
 
         ret = spdk_kv_get(handle, static_cast<uint64_t>(i), buffer, sizeof(buffer), &actual_len);
         if (ret != 0) {
-            fprintf(stderr, "Get failed for key %d: %d\n", i, ret);
+            fprintf(stderr, "get failed for key %d: %d\n", i, ret);
             spdk_kv_close(handle);
             return 1;
         }
         buffer[actual_len] = '\0';
-        printf("Get key %d: %s (len=%u)\n", i, buffer, actual_len);
+        printf("get key %d: %s (len=%u)\n", i, buffer, actual_len);
     }
     printf("\n");
 
-    // Delete a key
-    printf("--- Delete Operation ---\n");
+    // del a key
+    printf("--- del Operation ---\n");
     ret = spdk_kv_del(handle, 5);
     if (ret != 0) {
-        fprintf(stderr, "Delete failed: %d\n", ret);
+        fprintf(stderr, "del failed: %d\n", ret);
         spdk_kv_close(handle);
         return 1;
     }
@@ -98,11 +98,11 @@ int main() {
     printf("Total bytes: %lu\n", static_cast<unsigned long>(spdk_kv_get_total_bytes(handle)));
     printf("\n");
 
-    // Close engine
+    // close engine
     printf("Closing engine...\n");
     ret = spdk_kv_close(handle);
     if (ret != 0) {
-        fprintf(stderr, "Close failed: %d\n", ret);
+        fprintf(stderr, "close failed: %d\n", ret);
         return 1;
     }
     printf("Engine closed!\n\n");

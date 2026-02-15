@@ -18,7 +18,7 @@ namespace spdk_kv {
 SparseBitmap::SparseBitmap(size_t total_bits)
         : total_bits_(total_bits), chunk_count_((total_bits + kChunkBits - 1) / kChunkBits) {}
 
-void SparseBitmap::Set(size_t idx) {
+void SparseBitmap::set(size_t idx) {
     if (idx >= total_bits_) {
         return;
     }
@@ -30,10 +30,10 @@ void SparseBitmap::Set(size_t idx) {
     if (it == chunks_.end()) {
         chunks_[chunk_idx] = std::make_unique<Chunk>();
     }
-    chunks_[chunk_idx]->Set(bit_idx);
+    chunks_[chunk_idx]->set(bit_idx);
 }
 
-void SparseBitmap::Clear(size_t idx) {
+void SparseBitmap::clear(size_t idx) {
     if (idx >= total_bits_) {
         return;
     }
@@ -43,15 +43,15 @@ void SparseBitmap::Clear(size_t idx) {
 
     auto it = chunks_.find(chunk_idx);
     if (it != chunks_.end()) {
-        it->second->Clear(bit_idx);
+        it->second->clear(bit_idx);
         // Optionally free empty chunks
-        if (it->second->IsEmpty()) {
+        if (it->second->is_empty()) {
             chunks_.erase(it);
         }
     }
 }
 
-bool SparseBitmap::Test(size_t idx) const {
+bool SparseBitmap::test(size_t idx) const {
     if (idx >= total_bits_) {
         return false;
     }
@@ -61,15 +61,15 @@ bool SparseBitmap::Test(size_t idx) const {
     if (it == chunks_.end()) {
         return false;
     }
-    return it->second->Test(idx % kChunkBits);
+    return it->second->test(idx % kChunkBits);
 }
 
-size_t SparseBitmap::MemoryUsage() const { return chunks_.size() * sizeof(Chunk) + sizeof(*this); }
+size_t SparseBitmap::memory_usage() const { return chunks_.size() * sizeof(Chunk) + sizeof(*this); }
 
-size_t SparseBitmap::PopCount() const {
+size_t SparseBitmap::pop_count() const {
     size_t count = 0;
     for (const auto& pair : chunks_) {
-        count += pair.second->PopCount();
+        count += pair.second->pop_count();
     }
     return count;
 }
@@ -78,30 +78,30 @@ size_t SparseBitmap::PopCount() const {
 // FileMetadata implementation
 // ============================================================================
 
-void FileMetadata::MaybeCreateBitmap() {
-    if (!valid_bitmap && GarbageRatio() >= kBitmapCreationThreshold) {
+void FileMetadata::maybe_create_bitmap() {
+    if (!valid_bitmap && garbage_ratio() >= kBitmapCreationThreshold) {
         // 8GB / 4KB = 2M pages
         size_t total_pages = kDefaultFileSize / kPageSize;
         valid_bitmap = std::make_unique<SparseBitmap>(total_pages);
     }
 }
 
-void FileMetadata::MarkValid(uint32_t offset_index, uint16_t page_count, uint32_t bytes) {
+void FileMetadata::mark_valid(uint32_t offset_index, uint16_t page_count, uint32_t bytes) {
     if (valid_bitmap) {
         for (uint16_t i = 0; i < page_count; i++) {
-            valid_bitmap->Set(offset_index + i);
+            valid_bitmap->set(offset_index + i);
         }
     }
     valid_entries++;
     valid_bytes += bytes;
 }
 
-void FileMetadata::MarkInvalid(uint32_t offset_index, uint16_t page_count, uint32_t bytes) {
-    MaybeCreateBitmap();
+void FileMetadata::mark_invalid(uint32_t offset_index, uint16_t page_count, uint32_t bytes) {
+    maybe_create_bitmap();
 
     if (valid_bitmap) {
         for (uint16_t i = 0; i < page_count; i++) {
-            valid_bitmap->Clear(offset_index + i);
+            valid_bitmap->clear(offset_index + i);
         }
     }
     if (valid_entries > 0) {
@@ -112,12 +112,12 @@ void FileMetadata::MarkInvalid(uint32_t offset_index, uint16_t page_count, uint3
     }
 }
 
-bool FileMetadata::IsPageValid(uint32_t offset_index) const {
+bool FileMetadata::is_page_valid(uint32_t offset_index) const {
     if (!valid_bitmap) {
         // No bitmap, assume valid (conservative)
         return true;
     }
-    return valid_bitmap->Test(offset_index);
+    return valid_bitmap->test(offset_index);
 }
 
 // ============================================================================
@@ -126,18 +126,18 @@ bool FileMetadata::IsPageValid(uint32_t offset_index) const {
 
 RateLimiter::RateLimiter(uint32_t max_iops)
         : max_iops_(max_iops), tokens_(max_iops), last_update_ns_(0) {
-    // Calculate token interval in nanoseconds
+    // calculate token interval in nanoseconds
     token_interval_ns_ = 1000000000ULL / max_iops;
 }
 
-void RateLimiter::SetRate(uint32_t iops) {
+void RateLimiter::set_rate(uint32_t iops) {
     max_iops_ = iops;
     if (iops > 0) {
         token_interval_ns_ = 1000000000ULL / iops;
     }
 }
 
-bool RateLimiter::Allow() {
+bool RateLimiter::allow() {
     if (max_iops_ == 0) {
         return true;
     }
@@ -162,7 +162,7 @@ bool RateLimiter::Allow() {
     return false;
 }
 
-void RateLimiter::Reset() {
+void RateLimiter::reset() {
     tokens_ = max_iops_;
     last_update_ns_ = 0;
 }
@@ -194,58 +194,58 @@ CompactionTask::CompactionTask(uint16_t src_file_id, Engine* engine)
           io_pending_(false),
           retry_target_state_(State::kInit) {}
 
-CompactionTask::~CompactionTask() { FreeDmaBuffers(); }
+CompactionTask::~CompactionTask() { free_dma_buffers(); }
 
-void CompactionTask::Step() {
+void CompactionTask::step() {
     if (io_pending_) {
         return;
     }
 
     switch (state_) {
         case State::kInit:
-            Init();
+            init();
             break;
         case State::kMarkCompacting:
-            MarkCompacting();
+            mark_compacting();
             break;
         case State::kWaitMarkComplete:
             // Wait for IO completion
             break;
         case State::kReadChunk:
-            ReadNextChunk();
+            read_next_chunk();
             break;
         case State::kWaitReadComplete:
             // Wait for IO completion
             break;
         case State::kProcessEntries:
-            ProcessEntries();
+            process_entries();
             break;
         case State::kWriteChunk:
-            WriteChunk();
+            write_chunk();
             break;
         case State::kWaitWriteComplete:
             // Wait for IO completion
             break;
         case State::kUpdateIndices:
-            UpdateIndices();
+            update_indices();
             break;
         case State::kFinalize:
-            Finalize();
+            finalize();
             break;
         case State::kMarkDeleted:
-            MarkDeleted();
+            mark_deleted();
             break;
         case State::kWaitDeleteComplete:
             // Wait for IO completion
             break;
         case State::kRetryWait:
-            CheckRetryTimeout();
+            check_retry_timeout();
             break;
         case State::kRollback:
-            StartRollback();
+            start_rollback();
             break;
         case State::kRollbackMarkSealed:
-            RollbackMarkSealed();
+            rollback_mark_sealed();
             break;
         case State::kWaitRollbackComplete:
             // Wait for IO completion
@@ -257,10 +257,10 @@ void CompactionTask::Step() {
     }
 }
 
-void CompactionTask::Init() {
+void CompactionTask::init() {
     // Allocate DMA buffers
-    read_buffer_ = DmaAllocator::Alloc(kChunkSize, kPageSize);
-    write_buffer_ = DmaAllocator::Alloc(kChunkSize, kPageSize);
+    read_buffer_ = DmaAllocator::alloc(kChunkSize, kPageSize);
+    write_buffer_ = DmaAllocator::alloc(kChunkSize, kPageSize);
     if (!read_buffer_ || !write_buffer_) {
         last_error_ = -ENOMEM;
         state_ = State::kFailed;
@@ -268,8 +268,8 @@ void CompactionTask::Init() {
     }
 
     // Resolve source file info and metadata
-    src_file_info_ = engine_->GetFile(src_file_id_);
-    src_meta_ = engine_->GetFileMetadata(src_file_id_);
+    src_file_info_ = engine_->get_file(src_file_id_);
+    src_meta_ = engine_->get_file_metadata(src_file_id_);
     if (!src_file_info_ || !src_meta_) {
         last_error_ = -ENOENT;
         state_ = State::kFailed;
@@ -277,14 +277,14 @@ void CompactionTask::Init() {
     }
 
     // Allocate destination file
-    dest_file_info_ = engine_->AllocateNewFile();
+    dest_file_info_ = engine_->allocate_new_file();
     if (!dest_file_info_) {
         last_error_ = -ENOSPC;
         state_ = State::kFailed;
         return;
     }
     dest_file_id_ = dest_file_info_->file_id;
-    dest_meta_ = engine_->GetFileMetadata(dest_file_id_);
+    dest_meta_ = engine_->get_file_metadata(dest_file_id_);
 
     dest_offset_ = sizeof(DataFileHeader);
     migrated_entries_.clear();
@@ -292,22 +292,22 @@ void CompactionTask::Init() {
     state_ = State::kMarkCompacting;
 }
 
-void CompactionTask::MarkCompacting() {
+void CompactionTask::mark_compacting() {
     src_meta_->state = FileState::kCompacting;
     src_file_info_->state = FileState::kCompacting;
 
     io_pending_ = true;
-    WriteFileHeader(src_file_info_, FileState::kCompacting, [this](int status) {
+    write_file_header(src_file_info_, FileState::kCompacting, [this](int status) {
         io_pending_ = false;
         if (status == 0) {
             state_ = State::kReadChunk;
         } else {
-            HandleIoError(State::kMarkCompacting, status);
+            handle_io_error(State::kMarkCompacting, status);
         }
     });
 }
 
-void CompactionTask::SkipInvalidPages() {
+void CompactionTask::skip_invalid_pages() {
     if (!src_meta_->valid_bitmap) {
         return;
     }
@@ -316,16 +316,16 @@ void CompactionTask::SkipInvalidPages() {
     // Skip pages that are marked invalid
     while (current_offset_ < src_end) {
         uint32_t page_idx = static_cast<uint32_t>(current_offset_ / kPageSize);
-        if (src_meta_->IsPageValid(page_idx)) {
+        if (src_meta_->is_page_valid(page_idx)) {
             break;
         }
         current_offset_ += kPageSize;
     }
 }
 
-void CompactionTask::ReadNextChunk() {
+void CompactionTask::read_next_chunk() {
     // Skip invalid pages
-    SkipInvalidPages();
+    skip_invalid_pages();
 
     uint64_t src_end = src_file_info_->write_offset;
     if (current_offset_ >= src_end) {
@@ -340,10 +340,10 @@ void CompactionTask::ReadNextChunk() {
 
     size_t read_size = std::min(kChunkSize, static_cast<size_t>(src_end - current_offset_));
     // Align read size up to page boundary
-    read_size = AlignUp(read_size, kPageSize);
+    read_size = align_up(read_size, kPageSize);
 
     io_pending_ = true;
-    engine_->SubmitBlobRead(
+    engine_->submit_blob_read(
             src_file_info_, current_offset_, read_buffer_, static_cast<uint32_t>(read_size),
             [this, read_size](int status) {
                 io_pending_ = false;
@@ -351,12 +351,12 @@ void CompactionTask::ReadNextChunk() {
                     bytes_read_ = read_size;
                     state_ = State::kProcessEntries;
                 } else {
-                    HandleIoError(State::kReadChunk, status);
+                    handle_io_error(State::kReadChunk, status);
                 }
             });
 }
 
-bool CompactionTask::ValidateEntry(const void* entry_data, size_t max_size) {
+bool CompactionTask::validate_entry(const void* entry_data, size_t max_size) {
     if (max_size < sizeof(EntryHeader)) {
         return false;
     }
@@ -366,13 +366,13 @@ bool CompactionTask::ValidateEntry(const void* entry_data, size_t max_size) {
         return false;
     }
 
-    // Get value length
+    // get value length
     const char* ptr = static_cast<const char*>(entry_data);
     uint32_t value_len =
             *reinterpret_cast<const uint32_t*>(ptr + sizeof(EntryHeader) + sizeof(uint64_t));
 
-    // Calculate entry size
-    size_t entry_size = AlignUp(sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t) +
+    // calculate entry size
+    size_t entry_size = align_up(sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t) +
                                         value_len + sizeof(uint32_t),
                                 kPageSize);
 
@@ -383,22 +383,22 @@ bool CompactionTask::ValidateEntry(const void* entry_data, size_t max_size) {
     // Validate checksum
     uint32_t stored_checksum =
             *reinterpret_cast<const uint32_t*>(ptr + entry_size - sizeof(uint32_t));
-    uint32_t computed_checksum = Crc32::Calculate(ptr, entry_size - sizeof(uint32_t));
+    uint32_t computed_checksum = Crc32::calculate(ptr, entry_size - sizeof(uint32_t));
 
     return stored_checksum == computed_checksum;
 }
 
-void CompactionTask::ProcessEntries() {
+void CompactionTask::process_entries() {
     const char* ptr = static_cast<char*>(read_buffer_);
     char* wptr = static_cast<char*>(write_buffer_);
     size_t offset = 0;
-    MemIndex* mem_index = engine_->GetMemIndex();
+    MemIndex* mem_index = engine_->get_mem_index();
 
     while (offset < bytes_read_) {
         // Validate entry
-        if (!ValidateEntry(ptr + offset, bytes_read_ - offset)) {
+        if (!validate_entry(ptr + offset, bytes_read_ - offset)) {
             // Skip to next page
-            offset = AlignUp(offset + 1, kPageSize);
+            offset = align_up(offset + 1, kPageSize);
             continue;
         }
 
@@ -407,14 +407,14 @@ void CompactionTask::ProcessEntries() {
         uint32_t value_len = *reinterpret_cast<const uint32_t*>(ptr + offset + sizeof(EntryHeader) +
                                                                 sizeof(uint64_t));
 
-        size_t entry_size = AlignUp(sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t) +
+        size_t entry_size = align_up(sizeof(EntryHeader) + sizeof(uint64_t) + sizeof(uint32_t) +
                                             value_len + sizeof(uint32_t),
                                     kPageSize);
 
         entries_processed_++;
 
         // Check if this entry is still valid in the current index
-        MemIndexEntry* current = mem_index->Find(key);
+        MemIndexEntry* current = mem_index->find(key);
         bool should_migrate = false;
 
         if (current && !current->is_deleted()) {
@@ -431,8 +431,8 @@ void CompactionTask::ProcessEntries() {
         if (should_migrate && !(header->flags & kFlagDeleted)) {
             // Check if write buffer has space
             if (write_buffer_used_ + entry_size > kChunkSize) {
-                // Write buffer full - flush it first, then re-read this chunk
-                // (current_offset_ is NOT advanced, so ReadNextChunk will re-read)
+                // write buffer full - flush it first, then re-read this chunk
+                // (current_offset_ is NOT advanced, so read_next_chunk will re-read)
                 state_ = State::kWriteChunk;
                 return;
             }
@@ -465,14 +465,14 @@ void CompactionTask::ProcessEntries() {
     state_ = State::kReadChunk;
 }
 
-void CompactionTask::WriteChunk() {
+void CompactionTask::write_chunk() {
     if (write_buffer_used_ == 0) {
         state_ = State::kReadChunk;
         return;
     }
 
     io_pending_ = true;
-    engine_->SubmitBlobWrite(
+    engine_->submit_blob_write(
             dest_file_info_, dest_offset_, write_buffer_,
             static_cast<uint32_t>(write_buffer_used_), [this](int status) {
                 io_pending_ = false;
@@ -480,17 +480,17 @@ void CompactionTask::WriteChunk() {
                     retry_count_ = 0;
                     state_ = State::kUpdateIndices;
                 } else {
-                    HandleIoError(State::kWriteChunk, status);
+                    handle_io_error(State::kWriteChunk, status);
                 }
             });
 }
 
-void CompactionTask::UpdateIndices() {
-    MemIndex* mem_index = engine_->GetMemIndex();
+void CompactionTask::update_indices() {
+    MemIndex* mem_index = engine_->get_mem_index();
 
     // Update memory indices for migrated entries
     for (const auto& migrated : migrated_entries_) {
-        MemIndexEntry* current = mem_index->Find(migrated.key);
+        MemIndexEntry* current = mem_index->find(migrated.key);
         if (current) {
             // Only update if still pointing to old location
             // (prevents overwriting a newer user write that happened during compaction)
@@ -518,7 +518,7 @@ void CompactionTask::UpdateIndices() {
     state_ = State::kReadChunk;
 }
 
-void CompactionTask::Finalize() {
+void CompactionTask::finalize() {
     // Flush any remaining write buffer
     if (write_buffer_used_ > 0) {
         state_ = State::kWriteChunk;
@@ -529,27 +529,27 @@ void CompactionTask::Finalize() {
     state_ = State::kMarkDeleted;
 }
 
-void CompactionTask::MarkDeleted() {
+void CompactionTask::mark_deleted() {
     src_meta_->state = FileState::kDeleted;
     src_meta_->valid_entries = 0;
     src_meta_->valid_bytes = 0;
 
     io_pending_ = true;
-    WriteFileHeader(src_file_info_, FileState::kDeleted, [this](int status) {
+    write_file_header(src_file_info_, FileState::kDeleted, [this](int status) {
         io_pending_ = false;
         if (status == 0) {
-            // Clear committed updates (no longer needed since compaction succeeded)
+            // clear committed updates (no longer needed since compaction succeeded)
             committed_updates_.clear();
             migrated_entries_.clear();
-            FreeDmaBuffers();
+            free_dma_buffers();
             state_ = State::kDone;
         } else {
-            HandleIoError(State::kMarkDeleted, status);
+            handle_io_error(State::kMarkDeleted, status);
         }
     });
 }
 
-void CompactionTask::CheckRetryTimeout() {
+void CompactionTask::check_retry_timeout() {
     auto now = std::chrono::steady_clock::now();
     uint64_t now_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
@@ -560,11 +560,11 @@ void CompactionTask::CheckRetryTimeout() {
     }
 }
 
-void CompactionTask::HandleIoError(State retry_state, int error_code) {
+void CompactionTask::handle_io_error(State retry_state, int error_code) {
     retry_count_++;
     last_error_ = error_code;
 
-    if (IsRetryableError(error_code) && retry_count_ < kMaxRetryCount) {
+    if (is_retryable_error(error_code) && retry_count_ < kMaxRetryCount) {
         // Retryable error: wait and then retry the failed operation
         retry_target_state_ = retry_state;
         auto now = std::chrono::steady_clock::now();
@@ -577,7 +577,7 @@ void CompactionTask::HandleIoError(State retry_state, int error_code) {
     }
 }
 
-bool CompactionTask::IsRetryableError(int error_code) {
+bool CompactionTask::is_retryable_error(int error_code) {
     switch (error_code) {
         case -EAGAIN:
         case -EBUSY:
@@ -588,32 +588,32 @@ bool CompactionTask::IsRetryableError(int error_code) {
     }
 }
 
-void CompactionTask::StartRollback() {
-    MemIndex* mem_index = engine_->GetMemIndex();
+void CompactionTask::start_rollback() {
+    MemIndex* mem_index = engine_->get_mem_index();
     (void)mem_index;
 
     // 1. Revert all committed index updates (restore indices to point at source file)
     for (const auto& update : committed_updates_) {
-        RevertIndexUpdate(update);
+        revert_index_update(update);
     }
     committed_updates_.clear();
 
     // Also revert any pending (not yet committed) migrations
     for (const auto& update : migrated_entries_) {
-        RevertIndexUpdate(update);
+        revert_index_update(update);
     }
     migrated_entries_.clear();
 
     // 2. Clean up the partially-written destination file
     if (dest_file_info_ && dest_offset_ > sizeof(DataFileHeader)) {
-        DeleteGarbageFile();
+        delete_garbage_file();
     } else {
         state_ = State::kRollbackMarkSealed;
     }
 }
 
-void CompactionTask::RevertIndexUpdate(const MigratedEntry& update) {
-    MemIndexEntry* existing = engine_->GetMemIndex()->Find(update.key);
+void CompactionTask::revert_index_update(const MigratedEntry& update) {
+    MemIndexEntry* existing = engine_->get_mem_index()->find(update.key);
     if (!existing) {
         return;
     }
@@ -627,7 +627,7 @@ void CompactionTask::RevertIndexUpdate(const MigratedEntry& update) {
     }
 }
 
-void CompactionTask::DeleteGarbageFile() {
+void CompactionTask::delete_garbage_file() {
     // Mark dest file and metadata as deleted
     if (dest_file_info_) {
         dest_file_info_->state = FileState::kDeleted;
@@ -640,13 +640,13 @@ void CompactionTask::DeleteGarbageFile() {
 
     // Async close and delete the destination blob
     io_pending_ = true;
-    engine_->CompactionRemoveFile(dest_file_id_, [this](bool /*success*/) {
+    engine_->compaction_remove_file(dest_file_id_, [this](bool /*success*/) {
         io_pending_ = false;
         state_ = State::kRollbackMarkSealed;
     });
 }
 
-void CompactionTask::RollbackMarkSealed() {
+void CompactionTask::rollback_mark_sealed() {
     // Restore source file to SEALED state (it can be compacted again later)
     if (src_file_info_) {
         src_file_info_->state = FileState::kSealed;
@@ -657,33 +657,33 @@ void CompactionTask::RollbackMarkSealed() {
 
     // Async update the file header to persist sealed state
     io_pending_ = true;
-    WriteFileHeader(src_file_info_, FileState::kSealed, [this](int /*status*/) {
+    write_file_header(src_file_info_, FileState::kSealed, [this](int /*status*/) {
         io_pending_ = false;
 
         // Clean up remaining data
         migrated_entries_.clear();
         committed_updates_.clear();
         write_buffer_used_ = 0;
-        FreeDmaBuffers();
+        free_dma_buffers();
 
         state_ = State::kFailed;
     });
 }
 
-void CompactionTask::FreeDmaBuffers() {
+void CompactionTask::free_dma_buffers() {
     if (read_buffer_) {
-        DmaAllocator::Free(read_buffer_);
+        DmaAllocator::free(read_buffer_);
         read_buffer_ = nullptr;
     }
     if (write_buffer_) {
-        DmaAllocator::Free(write_buffer_);
+        DmaAllocator::free(write_buffer_);
         write_buffer_ = nullptr;
     }
 }
 
-void CompactionTask::WriteFileHeader(FileInfo* file, FileState new_state,
+void CompactionTask::write_file_header(FileInfo* file, FileState new_state,
                                      std::function<void(int status)> callback) {
-    void* dma_buf = DmaAllocator::AllocZeroed(kPageSize, kPageSize);
+    void* dma_buf = DmaAllocator::alloc_zeroed(kPageSize, kPageSize);
     if (!dma_buf) {
         if (callback) {
             callback(-ENOMEM);
@@ -697,11 +697,11 @@ void CompactionTask::WriteFileHeader(FileInfo* file, FileState new_state,
     header->file_id = file->file_id;
     header->state = new_state;
     header->create_time = 0;
-    header->checksum = Crc32::Calculate(header, sizeof(*header) - sizeof(header->checksum));
+    header->checksum = Crc32::calculate(header, sizeof(*header) - sizeof(header->checksum));
 
-    engine_->SubmitBlobWrite(file, 0, dma_buf, kPageSize,
+    engine_->submit_blob_write(file, 0, dma_buf, kPageSize,
                              [dma_buf, callback](int status) {
-                                 DmaAllocator::Free(dma_buf);
+                                 DmaAllocator::free(dma_buf);
                                  if (callback) {
                                      callback(status);
                                  }
@@ -720,12 +720,12 @@ CompactionScheduler::CompactionScheduler(Engine* engine)
 
 CompactionScheduler::~CompactionScheduler() {}
 
-void CompactionScheduler::ScheduleCompaction(uint16_t file_id) {
+void CompactionScheduler::schedule_compaction(uint16_t file_id) {
     auto task = std::make_unique<CompactionTask>(file_id, engine_);
     pending_tasks_.push(std::move(task));
 }
 
-void CompactionScheduler::Poll() {
+void CompactionScheduler::poll() {
     // Priority control
     if (compaction_paused_) {
         if (pending_foreground_count_ <= kResumeThreshold) {
@@ -741,16 +741,16 @@ void CompactionScheduler::Poll() {
 
         // Throttle based on load
         if (pending_foreground_count_ >= kThrottleThreshold) {
-            rate_limiter_.SetRate(kMaxIopsPerSec / 4);
+            rate_limiter_.set_rate(kMaxIopsPerSec / 4);
         } else if (pending_foreground_count_ >= kResumeThreshold) {
-            rate_limiter_.SetRate(kMaxIopsPerSec / 2);
+            rate_limiter_.set_rate(kMaxIopsPerSec / 2);
         } else {
-            rate_limiter_.SetRate(kMaxIopsPerSec);
+            rate_limiter_.set_rate(kMaxIopsPerSec);
         }
     }
 
     // Rate limiting
-    if (!rate_limiter_.Allow()) {
+    if (!rate_limiter_.allow()) {
         return;
     }
 
@@ -760,49 +760,49 @@ void CompactionScheduler::Poll() {
     }
 
     // CPU time tracking
-    uint64_t start_cycles = Rdtsc();
+    uint64_t start_cycles = rdtsc();
 
-    // Get or continue task
+    // get or continue task
     if (!active_task_ && !pending_tasks_.empty()) {
         active_task_ = std::move(pending_tasks_.front());
         pending_tasks_.pop();
     }
 
     // Execute task steps
-    while (active_task_ && !active_task_->IsComplete()) {
+    while (active_task_ && !active_task_->is_complete()) {
         // Check CPU time
-        uint64_t elapsed = Rdtsc() - start_cycles;
+        uint64_t elapsed = rdtsc() - start_cycles;
         if (elapsed > kMaxCyclesPerPoll) {
             break;
         }
 
-        active_task_->Step();
+        active_task_->step();
     }
 
     // Handle completed task
-    if (active_task_ && active_task_->IsComplete()) {
-        if (active_task_->IsFailed()) {
+    if (active_task_ && active_task_->is_complete()) {
+        if (active_task_->is_failed()) {
             // Log failure, maybe reschedule
         }
         active_task_.reset();
     }
 }
 
-std::vector<FileMetadata*> CompactionScheduler::SelectFilesForCompaction(double min_garbage_ratio) {
+std::vector<FileMetadata*> CompactionScheduler::select_files_for_compaction(double min_garbage_ratio) {
     std::vector<FileMetadata*> candidates;
 
-    const auto& file_metadata = engine_->GetFileMetadataMap();
+    const auto& file_metadata = engine_->get_file_metadata_map();
 
     for (auto& pair : file_metadata) {
         FileMetadata* file = const_cast<FileMetadata*>(&pair.second);
-        if (file->NeedsCompaction() && file->GarbageRatio() >= min_garbage_ratio) {
+        if (file->needs_compaction() && file->garbage_ratio() >= min_garbage_ratio) {
             candidates.push_back(file);
         }
     }
 
     // Sort by garbage ratio (highest first)
     std::sort(candidates.begin(), candidates.end(), [](FileMetadata* a, FileMetadata* b) {
-        return a->GarbageRatio() > b->GarbageRatio();
+        return a->garbage_ratio() > b->garbage_ratio();
     });
 
     return candidates;

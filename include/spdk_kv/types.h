@@ -92,10 +92,10 @@ enum class FileState : uint8_t {
 // IO state
 enum class IoState : uint8_t { kPending = 0, kBuffered, kWritingData, kCompleted, kFailed };
 
-// Write mode
+// write mode
 enum class PutMode : uint8_t {
-    LOCAL,      // Local Put, value is a local memory pointer
-    RDMA_WRITE  // RDMA Write, value already in DMA Buffer
+    LOCAL,      // Local put, value is a local memory pointer
+    RDMA_WRITE  // RDMA write, value already in DMA Buffer
 };
 
 // Entry flags
@@ -105,22 +105,22 @@ constexpr uint8_t kFlagSegmentBuf = 0x04;   // SegmentBuf zero-copy format
 
 // SegmentBuf on-disk layout offsets within the first segment
 constexpr size_t kSegmentMetaOffset = 256;   // Metadata starts at byte 256
-constexpr size_t kSegmentDataOffset = 512;   // Data resumes at byte 512
+constexpr size_t kSegmentDataOffset = 512;   // data resumes at byte 512
 
 // Callback type
 using KvCallback = void (*)(void* arg, int status);
 using KvGetCallback = void (*)(void* arg, int status, uint32_t actual_len);
 
 // Utility functions
-constexpr uint64_t AlignUp(uint64_t value, uint64_t alignment) {
+constexpr uint64_t align_up(uint64_t value, uint64_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
-constexpr uint64_t AlignDown(uint64_t value, uint64_t alignment) {
+constexpr uint64_t align_down(uint64_t value, uint64_t alignment) {
     return value & ~(alignment - 1);
 }
 
-constexpr bool IsAligned(uint64_t value, uint64_t alignment) {
+constexpr bool is_aligned(uint64_t value, uint64_t alignment) {
     return (value & (alignment - 1)) == 0;
 }
 

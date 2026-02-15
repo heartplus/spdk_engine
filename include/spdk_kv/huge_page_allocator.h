@@ -49,7 +49,7 @@ public:
     };
 
     // Allocate 1GB hugepage memory with optional NUMA binding and warmup
-    static void* Alloc1GHugepage(size_t size, int numa_node = -1,
+    static void* alloc_1g_hugepage(size_t size, int numa_node = -1,
                                  WarmupMode warmup = WarmupMode::ON_LOAD) {
         // Align up to 1GB
         size_t aligned_size = (size + kHugePage1G - 1) & ~(kHugePage1G - 1);
@@ -79,13 +79,13 @@ public:
         }
 #endif
 
-        ApplyWarmup(ptr, aligned_size, warmup, numa_node);
+        apply_warmup(ptr, aligned_size, warmup, numa_node);
 
         return ptr;
     }
 
-    // Free hugepage memory
-    static void FreeHugepage(void* ptr, size_t size) {
+    // free hugepage memory
+    static void free_hugepage(void* ptr, size_t size) {
         if (!ptr) {
             return;
         }
@@ -94,7 +94,7 @@ public:
     }
 
     // Allocate via SPDK's DMA allocation (uses 2MB hugepages by default)
-    static void* AllocSpdkHugepage(size_t size, int numa_node) {
+    static void* alloc_spdk_hugepage(size_t size, int numa_node) {
         void* ptr = spdk_dma_malloc_socket(size, kHugePage1G, nullptr, numa_node);
         if (ptr) {
             std::memset(ptr, 0, size);
@@ -103,7 +103,7 @@ public:
     }
 
 private:
-    static void ApplyWarmup(void* ptr, size_t size, WarmupMode warmup, int numa_node) {
+    static void apply_warmup(void* ptr, size_t size, WarmupMode warmup, int numa_node) {
         switch (warmup) {
         case WarmupMode::SYNC:
             // Synchronous warmup: block until all pages are faulted in
@@ -111,7 +111,7 @@ private:
             break;
 
         case WarmupMode::ASYNC:
-            StartAsyncWarmup(ptr, size, numa_node);
+            start_async_warmup(ptr, size, numa_node);
             break;
 
         case WarmupMode::LAZY:
@@ -125,7 +125,7 @@ private:
         }
     }
 
-    static void StartAsyncWarmup(void* ptr, size_t size, int numa_node) {
+    static void start_async_warmup(void* ptr, size_t size, int numa_node) {
         std::thread warmup_thread([ptr, size, numa_node]() {
 #ifdef __linux__
             if (numa_node >= 0) {
@@ -182,20 +182,20 @@ public:
 
     // Allocate index memory with automatic fallback
     // For high-QPS production: use SYNC warmup to guarantee 0 page faults at runtime
-    static AllocResult AllocateIndexMemory(
+    static AllocResult allocate_index_memory(
             size_t size, int numa_node = -1,
             HugePageAllocator::WarmupMode warmup = HugePageAllocator::WarmupMode::SYNC) {
         AllocResult result = {nullptr, size, AllocMethod::HUGEPAGE_1G};
 
         // 1. Try 1GB hugepages
-        result.ptr = HugePageAllocator::Alloc1GHugepage(size, numa_node, warmup);
+        result.ptr = HugePageAllocator::alloc_1g_hugepage(size, numa_node, warmup);
         if (result.ptr) {
             result.method = AllocMethod::HUGEPAGE_1G;
             return result;
         }
 
         // 2. Fallback to SPDK 2MB hugepages
-        result.ptr = HugePageAllocator::AllocSpdkHugepage(size, numa_node);
+        result.ptr = HugePageAllocator::alloc_spdk_hugepage(size, numa_node);
         if (result.ptr) {
             result.method = AllocMethod::SPDK_HUGEPAGE;
             return result;
@@ -218,15 +218,15 @@ public:
         return result;
     }
 
-    // Free index memory based on allocation method
-    static void FreeIndexMemory(void* ptr, size_t size, AllocMethod method) {
+    // free index memory based on allocation method
+    static void free_index_memory(void* ptr, size_t size, AllocMethod method) {
         if (!ptr) {
             return;
         }
 
         switch (method) {
         case AllocMethod::HUGEPAGE_1G:
-            HugePageAllocator::FreeHugepage(ptr, size);
+            HugePageAllocator::free_hugepage(ptr, size);
             break;
         case AllocMethod::SPDK_HUGEPAGE:
         case AllocMethod::SPDK_4K:

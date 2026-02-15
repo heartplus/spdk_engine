@@ -30,29 +30,29 @@ public:
     explicit SparseBitmap(size_t total_bits);
     ~SparseBitmap() = default;
 
-    // Set bit at index
-    void Set(size_t idx);
+    // set bit at index
+    void set(size_t idx);
 
-    // Clear bit at index
-    void Clear(size_t idx);
+    // clear bit at index
+    void clear(size_t idx);
 
-    // Test bit at index
-    bool Test(size_t idx) const;
+    // test bit at index
+    bool test(size_t idx) const;
 
-    // Get memory usage
-    size_t MemoryUsage() const;
+    // get memory usage
+    size_t memory_usage() const;
 
-    // Get count of set bits (approximate)
-    size_t PopCount() const;
+    // get count of set bits (approximate)
+    size_t pop_count() const;
 
 private:
     struct Chunk {
         uint64_t data[kChunkBits / 64] = {0};
 
-        void Set(size_t idx) { data[idx / 64] |= (1ULL << (idx % 64)); }
-        void Clear(size_t idx) { data[idx / 64] &= ~(1ULL << (idx % 64)); }
-        bool Test(size_t idx) const { return (data[idx / 64] & (1ULL << (idx % 64))) != 0; }
-        bool IsEmpty() const {
+        void set(size_t idx) { data[idx / 64] |= (1ULL << (idx % 64)); }
+        void clear(size_t idx) { data[idx / 64] &= ~(1ULL << (idx % 64)); }
+        bool test(size_t idx) const { return (data[idx / 64] & (1ULL << (idx % 64))) != 0; }
+        bool is_empty() const {
             for (auto d : data) {
                 if (d) {
                     return false;
@@ -60,7 +60,7 @@ private:
             }
             return true;
         }
-        size_t PopCount() const {
+        size_t pop_count() const {
             size_t count = 0;
             for (auto d : data) {
                 count += __builtin_popcountll(d);
@@ -97,8 +97,8 @@ struct FileMetadata {
               total_bytes(0),
               valid_bytes(0) {}
 
-    // Calculate garbage ratio
-    double GarbageRatio() const {
+    // calculate garbage ratio
+    double garbage_ratio() const {
         if (total_bytes == 0) {
             return 0.0;
         }
@@ -106,24 +106,24 @@ struct FileMetadata {
     }
 
     // Check if compaction is needed
-    bool NeedsCompaction() const {
-        return state == FileState::kSealed && GarbageRatio() >= kBitmapCreationThreshold;
+    bool needs_compaction() const {
+        return state == FileState::kSealed && garbage_ratio() >= kBitmapCreationThreshold;
     }
 
-    // Create bitmap if needed
-    void MaybeCreateBitmap();
+    // create bitmap if needed
+    void maybe_create_bitmap();
 
     // Mark pages as valid
-    void MarkValid(uint32_t offset_index, uint16_t page_count, uint32_t bytes);
+    void mark_valid(uint32_t offset_index, uint16_t page_count, uint32_t bytes);
 
     // Mark pages as invalid (garbage)
-    void MarkInvalid(uint32_t offset_index, uint16_t page_count, uint32_t bytes);
+    void mark_invalid(uint32_t offset_index, uint16_t page_count, uint32_t bytes);
 
     // Check if a page is valid
-    bool IsPageValid(uint32_t offset_index) const;
+    bool is_page_valid(uint32_t offset_index) const;
 
-    // Get bitmap memory usage
-    size_t BitmapMemoryUsage() const { return valid_bitmap ? valid_bitmap->MemoryUsage() : 0; }
+    // get bitmap memory usage
+    size_t bitmap_memory_usage() const { return valid_bitmap ? valid_bitmap->memory_usage() : 0; }
 };
 
 // Rate limiter for compaction IO
@@ -131,14 +131,14 @@ class RateLimiter {
 public:
     explicit RateLimiter(uint32_t max_iops);
 
-    // Set rate limit
-    void SetRate(uint32_t iops);
+    // set rate limit
+    void set_rate(uint32_t iops);
 
     // Check if operation is allowed
-    bool Allow();
+    bool allow();
 
-    // Reset state
-    void Reset();
+    // reset state
+    void reset();
 
 private:
     uint32_t max_iops_;
@@ -184,21 +184,21 @@ public:
     ~CompactionTask();
 
     // Execute one step (non-blocking)
-    void Step();
+    void step();
 
     // Check if task is complete
-    bool IsComplete() const { return state_ == State::kDone || state_ == State::kFailed; }
+    bool is_complete() const { return state_ == State::kDone || state_ == State::kFailed; }
 
     // Check if task failed
-    bool IsFailed() const { return state_ == State::kFailed; }
+    bool is_failed() const { return state_ == State::kFailed; }
 
-    // Get last error
-    int GetLastError() const { return last_error_; }
+    // get last error
+    int get_last_error() const { return last_error_; }
 
-    // Get source file ID
-    uint16_t GetSourceFileId() const { return src_file_id_; }
+    // get source file ID
+    uint16_t get_source_file_id() const { return src_file_id_; }
 
-    // Get migrated entries info (for index update)
+    // get migrated entries info (for index update)
     struct MigratedEntry {
         uint64_t key;
         uint16_t old_file_id;
@@ -208,45 +208,45 @@ public:
         uint16_t page_count;
         uint32_t sequence;
     };
-    const std::vector<MigratedEntry>& GetMigratedEntries() const { return migrated_entries_; }
+    const std::vector<MigratedEntry>& get_migrated_entries() const { return migrated_entries_; }
 
 private:
     // State handlers
-    void Init();
-    void MarkCompacting();
-    void ReadNextChunk();
-    void ProcessEntries();
-    void WriteChunk();
-    void UpdateIndices();
-    void Finalize();
-    void MarkDeleted();
-    void CheckRetryTimeout();
-    void StartRollback();
-    void RollbackMarkSealed();
+    void init();
+    void mark_compacting();
+    void read_next_chunk();
+    void process_entries();
+    void write_chunk();
+    void update_indices();
+    void finalize();
+    void mark_deleted();
+    void check_retry_timeout();
+    void start_rollback();
+    void rollback_mark_sealed();
 
     // Skip invalid pages using bitmap
-    void SkipInvalidPages();
+    void skip_invalid_pages();
 
     // Validate entry
-    bool ValidateEntry(const void* entry_data, size_t max_size);
+    bool validate_entry(const void* entry_data, size_t max_size);
 
     // IO error handling with retry support
-    void HandleIoError(State retry_state, int error_code);
+    void handle_io_error(State retry_state, int error_code);
 
     // Check if an error code is retryable
-    static bool IsRetryableError(int error_code);
+    static bool is_retryable_error(int error_code);
 
     // Revert a single committed index update during rollback
-    void RevertIndexUpdate(const MigratedEntry& update);
+    void revert_index_update(const MigratedEntry& update);
 
-    // Delete partially-written garbage destination file during rollback
-    void DeleteGarbageFile();
+    // del partially-written garbage destination file during rollback
+    void delete_garbage_file();
 
-    // Free DMA read/write buffers
-    void FreeDmaBuffers();
+    // free DMA read/write buffers
+    void free_dma_buffers();
 
-    // Write file header to blob at offset 0
-    void WriteFileHeader(FileInfo* file, FileState new_state,
+    // write file header to blob at offset 0
+    void write_file_header(FileInfo* file, FileState new_state,
                          std::function<void(int status)> callback);
 
     // Members
@@ -306,28 +306,28 @@ public:
     CompactionScheduler& operator=(const CompactionScheduler&) = delete;
 
     // Schedule a file for compaction
-    void ScheduleCompaction(uint16_t file_id);
+    void schedule_compaction(uint16_t file_id);
 
-    // Poll compaction progress (call in main loop)
-    void Poll();
+    // poll compaction progress (call in main loop)
+    void poll();
 
-    // Set pending foreground request count (for priority control)
-    void SetPendingForegroundCount(size_t count) { pending_foreground_count_ = count; }
+    // set pending foreground request count (for priority control)
+    void set_pending_foreground_count(size_t count) { pending_foreground_count_ = count; }
 
     // Check if compaction is paused
-    bool IsPaused() const { return compaction_paused_; }
+    bool is_paused() const { return compaction_paused_; }
 
-    // Get number of pending tasks
-    size_t PendingTaskCount() const { return pending_tasks_.size(); }
+    // get number of pending tasks
+    size_t pending_task_count() const { return pending_tasks_.size(); }
 
     // Check if any task is active
-    bool HasActiveTask() const { return active_task_ != nullptr; }
+    bool has_active_task() const { return active_task_ != nullptr; }
 
     // Select files for compaction based on garbage ratio
-    std::vector<FileMetadata*> SelectFilesForCompaction(double min_garbage_ratio = 0.3);
+    std::vector<FileMetadata*> select_files_for_compaction(double min_garbage_ratio = 0.3);
 
 private:
-    static inline uint64_t Rdtsc() {
+    static inline uint64_t rdtsc() {
 #if defined(__x86_64__) || defined(__i386__)
         uint32_t lo, hi;
         __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));

@@ -22,15 +22,15 @@ using namespace spdk_kv;
 // =============================================================================
 // Lock-free SPSC Queue (Single Producer Single Consumer)
 // =============================================================================
-template <typename T, size_t Capacity>
+template <typename T, size_t capacity>
 class SpscQueue {
 public:
     SpscQueue() : head_(0), tail_(0) {}
 
     // Producer: try to enqueue an item
-    bool TryPush(const T& item) {
+    bool try_push(const T& item) {
         size_t head = head_.load(std::memory_order_relaxed);
-        size_t next_head = (head + 1) % Capacity;
+        size_t next_head = (head + 1) % capacity;
 
         if (next_head == tail_.load(std::memory_order_acquire)) {
             return false;  // Queue is full
@@ -42,7 +42,7 @@ public:
     }
 
     // Consumer: try to dequeue an item
-    bool TryPop(T& item) {
+    bool try_pop(T& item) {
         size_t tail = tail_.load(std::memory_order_relaxed);
 
         if (tail == head_.load(std::memory_order_acquire)) {
@@ -50,24 +50,24 @@ public:
         }
 
         item = buffer_[tail];
-        tail_.store((tail + 1) % Capacity, std::memory_order_release);
+        tail_.store((tail + 1) % capacity, std::memory_order_release);
         return true;
     }
 
-    bool IsEmpty() const {
+    bool is_empty() const {
         return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_acquire);
     }
 
-    size_t Size() const {
+    size_t size() const {
         size_t head = head_.load(std::memory_order_acquire);
         size_t tail = tail_.load(std::memory_order_acquire);
-        return (head >= tail) ? (head - tail) : (Capacity - tail + head);
+        return (head >= tail) ? (head - tail) : (capacity - tail + head);
     }
 
 private:
     alignas(64) std::atomic<size_t> head_;
     alignas(64) std::atomic<size_t> tail_;
-    T buffer_[Capacity];
+    T buffer_[capacity];
 };
 
 // =============================================================================
@@ -78,8 +78,8 @@ enum class TaskType { kPut, kGet, kDelete, kStop };
 struct Task {
     TaskType type;
     uint64_t key;
-    std::vector<char> value;      // For Put: value to write
-    std::vector<char>* read_buf;  // For Get: buffer to read into
+    std::vector<char> value;      // For put: value to write
+    std::vector<char>* read_buf;  // For get: buffer to read into
     uint32_t value_len;
     uint64_t task_id;
 };
@@ -88,7 +88,7 @@ struct TaskResult {
     uint64_t task_id;
     TaskType type;
     int status;
-    uint32_t actual_len;  // For Get operations
+    uint32_t actual_len;  // For get operations
 };
 
 // =============================================================================
@@ -116,16 +116,16 @@ std::atomic<bool> g_running{true};
 struct CompletionContext {
     uint64_t task_id;
     TaskType type;
-    SegmentBuf* segment_buf;  // For Get: holds output buffer pointers
-    void* dma_buffer;         // For Get: DMA buffer to be freed after completion
+    SegmentBuf* segment_buf;  // For get: holds output buffer pointers
+    void* dma_buffer;         // For get: DMA buffer to be freed after completion
 };
 
-void OnPutComplete(void* arg, int status) {
+void on_put_complete(void* arg, int status) {
     auto* ctx = static_cast<CompletionContext*>(arg);
     TaskResult result{ctx->task_id, ctx->type, status, 0};
 
     // Send result back to worker thread
-    while (!g_result_queue.TryPush(result)) {
+    while (!g_result_queue.try_push(result)) {
         // Result queue full, spin wait (should rarely happen)
     }
 
@@ -133,17 +133,17 @@ void OnPutComplete(void* arg, int status) {
     g_completed++;
 }
 
-void OnGetComplete(void* arg, int status, uint32_t actual_len) {
+void on_get_complete(void* arg, int status, uint32_t actual_len) {
     auto* ctx = static_cast<CompletionContext*>(arg);
     TaskResult result{ctx->task_id, ctx->type, status, actual_len};
 
-    // Free the DMA buffer that was pre-allocated for GetAsync
+    // free the DMA buffer that was pre-allocated for get_async
     if (ctx->dma_buffer) {
-        DmaAllocator::Free(ctx->dma_buffer);
+        DmaAllocator::free(ctx->dma_buffer);
     }
     delete ctx->segment_buf;
 
-    while (!g_result_queue.TryPush(result)) {
+    while (!g_result_queue.try_push(result)) {
         // Result queue full, spin wait
     }
 
@@ -151,11 +151,11 @@ void OnGetComplete(void* arg, int status, uint32_t actual_len) {
     g_completed++;
 }
 
-void OnDeleteComplete(void* arg, int status) {
+void on_delete_complete(void* arg, int status) {
     auto* ctx = static_cast<CompletionContext*>(arg);
     TaskResult result{ctx->task_id, ctx->type, status, 0};
 
-    while (!g_result_queue.TryPush(result)) {
+    while (!g_result_queue.try_push(result)) {
         // Result queue full, spin wait
     }
 
@@ -166,13 +166,13 @@ void OnDeleteComplete(void* arg, int status) {
 // =============================================================================
 // Main thread: polling loop
 // =============================================================================
-void MainThreadLoop() {
+void main_thread_loop() {
     std::cout << "[Main] Polling loop started" << std::endl;
 
     while (g_running.load(std::memory_order_relaxed)) {
         // 1. Process tasks from task queue
         Task task;
-        while (g_task_queue.TryPop(task)) {
+        while (g_task_queue.try_pop(task)) {
             if (task.type == TaskType::kStop) {
                 std::cout << "[Main] Received stop signal" << std::endl;
                 g_running.store(false, std::memory_order_relaxed);
@@ -183,22 +183,22 @@ void MainThreadLoop() {
 
             switch (task.type) {
                 case TaskType::kPut:
-                    g_engine->PutBuffered(task.key, task.value.data(), task.value_len,
-                                          OnPutComplete, ctx);
+                    g_engine->put_buffered(task.key, task.value.data(), task.value_len,
+                                          on_put_complete, ctx);
                     break;
 
                 case TaskType::kGet: {
-                    // Pre-allocate DMA buffer for GetAsync (zero-copy read)
+                    // Pre-allocate DMA buffer for get_async (zero-copy read)
                     // Use the expected read buffer size, aligned to 4KB
-                    uint32_t buf_size = AlignUp(
+                    uint32_t buf_size = align_up(
                             static_cast<uint64_t>(task.read_buf->size()) + kSegmentDataOffset,
                             kPageSize);
-                    void* dma_buf = DmaAllocator::Alloc(buf_size, kPageSize);
+                    void* dma_buf = DmaAllocator::alloc(buf_size, kPageSize);
                     if (!dma_buf) {
                         // Allocation failed, report error via result queue
                         TaskResult result{task.task_id, task.type,
                                           static_cast<int>(KvError::kInternalError), 0};
-                        while (!g_result_queue.TryPush(result)) {}
+                        while (!g_result_queue.try_push(result)) {}
                         delete ctx;
                         g_completed++;
                         break;
@@ -211,12 +211,12 @@ void MainThreadLoop() {
                     ctx->segment_buf->buffers_[0].iov_len = buf_size;
                     ctx->dma_buffer = dma_buf;
 
-                    g_engine->GetAsync(task.key, ctx->segment_buf, OnGetComplete, ctx);
+                    g_engine->get_async(task.key, ctx->segment_buf, on_get_complete, ctx);
                     break;
                 }
 
                 case TaskType::kDelete:
-                    g_engine->DeleteAsync(task.key, OnDeleteComplete, ctx);
+                    g_engine->delete_async(task.key, on_delete_complete, ctx);
                     break;
 
                 default:
@@ -225,14 +225,14 @@ void MainThreadLoop() {
             }
         }
 
-        // 2. Poll engine for completions
-        g_engine->Poll();
+        // 2. poll engine for completions
+        g_engine->poll();
     }
 
     // Drain remaining tasks
     std::cout << "[Main] Draining remaining tasks..." << std::endl;
     while (g_submitted.load() > g_completed.load()) {
-        g_engine->Poll();
+        g_engine->poll();
     }
 
     std::cout << "[Main] Polling loop ended" << std::endl;
@@ -249,8 +249,8 @@ struct WorkerConfig {
     int del_ratio;  // percentage (0-100)
 };
 
-// Find a valid key for read/delete (search backwards from current position)
-uint64_t FindValidKey(const std::vector<bool>& key_written, int ops_submitted) {
+// find a valid key for read/delete (search backwards from current position)
+uint64_t find_valid_key(const std::vector<bool>& key_written, int ops_submitted) {
     for (int j = ops_submitted; j > 0; j--) {
         if (key_written[j]) {
             return static_cast<uint64_t>(j);
@@ -259,8 +259,8 @@ uint64_t FindValidKey(const std::vector<bool>& key_written, int ops_submitted) {
     return 0;
 }
 
-// Create a put task
-void MakePutTask(Task& task, int ops_submitted, std::vector<bool>& key_written) {
+// create a put task
+void make_put_task(Task& task, int ops_submitted, std::vector<bool>& key_written) {
     task.type = TaskType::kPut;
     task.key = ops_submitted + 1;
     std::string val = "value_" + std::to_string(task.key) + "_data_padding_for_test";
@@ -270,10 +270,10 @@ void MakePutTask(Task& task, int ops_submitted, std::vector<bool>& key_written) 
     key_written[task.key] = true;
 }
 
-// Create a get task, returns false if fallback to put is needed
-bool MakeGetTask(Task& task, int ops_submitted, std::vector<bool>& key_written,
+// create a get task, returns false if fallback to put is needed
+bool make_get_task(Task& task, int ops_submitted, std::vector<bool>& key_written,
                  std::vector<char>* free_buf) {
-    uint64_t get_key = FindValidKey(key_written, ops_submitted);
+    uint64_t get_key = find_valid_key(key_written, ops_submitted);
     if (get_key > 0 && free_buf) {
         task.type = TaskType::kGet;
         task.key = get_key;
@@ -283,9 +283,9 @@ bool MakeGetTask(Task& task, int ops_submitted, std::vector<bool>& key_written,
     return false;
 }
 
-// Create a delete task, returns false if fallback to put is needed
-bool MakeDeleteTask(Task& task, int ops_submitted, std::vector<bool>& key_written) {
-    uint64_t del_key = FindValidKey(key_written, ops_submitted);
+// create a delete task, returns false if fallback to put is needed
+bool make_delete_task(Task& task, int ops_submitted, std::vector<bool>& key_written) {
+    uint64_t del_key = find_valid_key(key_written, ops_submitted);
     if (del_key > 0) {
         task.type = TaskType::kDelete;
         task.key = del_key;
@@ -295,11 +295,11 @@ bool MakeDeleteTask(Task& task, int ops_submitted, std::vector<bool>& key_writte
     return false;
 }
 
-void WorkerThreadLoop(const WorkerConfig& config) {
+void worker_thread_loop(const WorkerConfig& config) {
     std::cout << "[Worker] Started (total_ops=" << config.total_ops
               << ", max_inflight=" << config.max_inflight << ")" << std::endl;
 
-    // Allocate read buffers for Get operations
+    // Allocate read buffers for get operations
     std::vector<std::vector<char>> read_buffers(config.max_inflight, std::vector<char>(4096));
     std::vector<bool> buffer_in_use(config.max_inflight, false);
 
@@ -340,7 +340,7 @@ void WorkerThreadLoop(const WorkerConfig& config) {
     while (ops_completed_local < config.total_ops || inflight > 0) {
         // 1. Process results from main thread
         TaskResult result;
-        while (g_result_queue.TryPop(result)) {
+        while (g_result_queue.try_pop(result)) {
             inflight--;
             ops_completed_local++;
 
@@ -359,7 +359,7 @@ void WorkerThreadLoop(const WorkerConfig& config) {
                     } else {
                         get_fail++;
                     }
-                    // Release buffer (simplified - in real code track which buffer was used)
+                    // release buffer (simplified - in real code track which buffer was used)
                     break;
 
                 case TaskType::kDelete:
@@ -384,19 +384,19 @@ void WorkerThreadLoop(const WorkerConfig& config) {
             int type_rand = ops_submitted % 100;
 
             if (type_rand < config.put_ratio) {
-                MakePutTask(task, ops_submitted, key_written);
+                make_put_task(task, ops_submitted, key_written);
             } else if (type_rand < config.put_ratio + config.get_ratio) {
-                if (!MakeGetTask(task, ops_submitted, key_written, get_free_buffer())) {
-                    MakePutTask(task, ops_submitted, key_written);
+                if (!make_get_task(task, ops_submitted, key_written, get_free_buffer())) {
+                    make_put_task(task, ops_submitted, key_written);
                 }
             } else {
-                if (!MakeDeleteTask(task, ops_submitted, key_written)) {
-                    MakePutTask(task, ops_submitted, key_written);
+                if (!make_delete_task(task, ops_submitted, key_written)) {
+                    make_put_task(task, ops_submitted, key_written);
                 }
             }
 
             // Try to submit task
-            if (g_task_queue.TryPush(task)) {
+            if (g_task_queue.try_push(task)) {
                 g_submitted++;
                 ops_submitted++;
                 inflight++;
@@ -419,7 +419,7 @@ void WorkerThreadLoop(const WorkerConfig& config) {
     // Send stop signal
     Task stop_task;
     stop_task.type = TaskType::kStop;
-    while (!g_task_queue.TryPush(stop_task)) {
+    while (!g_task_queue.try_push(stop_task)) {
         std::this_thread::yield();
     }
 
@@ -432,23 +432,23 @@ void WorkerThreadLoop(const WorkerConfig& config) {
         std::cout << "  Throughput: " << (ops_completed_local * 1000.0 / duration_ms) << " ops/sec"
                   << std::endl;
     }
-    std::cout << "  Put: " << put_success << " success, " << put_fail << " fail" << std::endl;
-    std::cout << "  Get: " << get_success << " success, " << get_fail << " fail" << std::endl;
-    std::cout << "  Delete: " << del_success << " success, " << del_fail << " fail" << std::endl;
+    std::cout << "  put: " << put_success << " success, " << put_fail << " fail" << std::endl;
+    std::cout << "  get: " << get_success << " success, " << get_fail << " fail" << std::endl;
+    std::cout << "  del: " << del_success << " success, " << del_fail << " fail" << std::endl;
 }
 
 // =============================================================================
 // Usage
 // =============================================================================
-void PrintUsage(const char* prog) {
+void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]" << std::endl;
     std::cout << "Options:" << std::endl;
     std::cout << "  --bdev <name>      SPDK bdev name (e.g., Malloc0, Nvme0n1)" << std::endl;
     std::cout << "  --num-ops <n>      Total number of operations (default: 10000)" << std::endl;
     std::cout << "  --max-inflight <n> Max in-flight operations (default: 64)" << std::endl;
-    std::cout << "  --put-ratio <n>    Put operation ratio % (default: 70)" << std::endl;
-    std::cout << "  --get-ratio <n>    Get operation ratio % (default: 25)" << std::endl;
-    std::cout << "  --del-ratio <n>    Delete operation ratio % (default: 5)" << std::endl;
+    std::cout << "  --put-ratio <n>    put operation ratio % (default: 70)" << std::endl;
+    std::cout << "  --get-ratio <n>    get operation ratio % (default: 25)" << std::endl;
+    std::cout << "  --del-ratio <n>    del operation ratio % (default: 5)" << std::endl;
     std::cout << "  --help             Show this help" << std::endl;
 }
 
@@ -481,7 +481,7 @@ int main(int argc, char** argv) {
         } else if (arg == "--del-ratio" && i + 1 < argc) {
             config.del_ratio = std::stoi(argv[++i]);
         } else if (arg == "--help") {
-            PrintUsage(argv[0]);
+            print_usage(argv[0]);
             return 0;
         }
     }
@@ -506,8 +506,8 @@ int main(int argc, char** argv) {
     spdk_opts.name = "spsc_example";
     spdk_opts.bdev_name = bdev_name;
 
-    auto& env = SpdkEnv::Instance();
-    if (env.Initialize(spdk_opts)) {
+    auto& env = SpdkEnv::instance();
+    if (env.initialize(spdk_opts)) {
         std::cout << "SPDK initialized with bdev: " << bdev_name << std::endl;
     } else {
         std::cerr << "Failed to initialize SPDK" << std::endl;
@@ -520,19 +520,19 @@ int main(int argc, char** argv) {
     std::cout << "Configuration:" << std::endl;
     std::cout << "  Total operations: " << config.total_ops << std::endl;
     std::cout << "  Max in-flight:    " << config.max_inflight << std::endl;
-    std::cout << "  Put ratio:        " << config.put_ratio << "%" << std::endl;
-    std::cout << "  Get ratio:        " << config.get_ratio << "%" << std::endl;
-    std::cout << "  Delete ratio:     " << config.del_ratio << "%" << std::endl;
+    std::cout << "  put ratio:        " << config.put_ratio << "%" << std::endl;
+    std::cout << "  get ratio:        " << config.get_ratio << "%" << std::endl;
+    std::cout << "  del ratio:     " << config.del_ratio << "%" << std::endl;
     std::cout << std::endl;
 
-    // Create engine
+    // create engine
     Engine engine;
     CreateOpts create_opts;
     create_opts.config.max_entries = static_cast<uint64_t>(std::max(100000, config.total_ops * 2));
     create_opts.config.data_file_size = 256 * 1024 * 1024;  // 256MB
 
     std::cout << "Creating engine..." << std::endl;
-    KvError err = engine.Create("/tmp/spdk_kv_spsc", create_opts);
+    KvError err = engine.create("/tmp/spdk_kv_spsc", create_opts);
     if (err != KvError::kSuccess) {
         std::cerr << "Failed to create engine: " << static_cast<int>(err) << std::endl;
         return 1;
@@ -545,30 +545,30 @@ int main(int argc, char** argv) {
     g_submitted.store(0);
     g_completed.store(0);
 
-    // Start worker thread
+    // start worker thread
     std::cout << "Starting threads..." << std::endl;
-    std::thread worker_thread(WorkerThreadLoop, config);
+    std::thread worker_thread(worker_thread_loop, config);
 
     // Main thread runs polling loop
-    MainThreadLoop();
+    main_thread_loop();
 
     // Wait for worker to finish
     worker_thread.join();
 
     std::cout << std::endl;
     std::cout << "--- Final Statistics ---" << std::endl;
-    std::cout << "Entry count: " << engine.GetEntryCount() << std::endl;
-    std::cout << "Total data bytes: " << engine.GetTotalDataBytes() << std::endl;
-    std::cout << "Index load factor: " << engine.GetIndexLoadFactor() << std::endl;
+    std::cout << "Entry count: " << engine.get_entry_count() << std::endl;
+    std::cout << "Total data bytes: " << engine.get_total_data_bytes() << std::endl;
+    std::cout << "Index load factor: " << engine.get_index_load_factor() << std::endl;
     std::cout << std::endl;
 
-    // Close engine
+    // close engine
     std::cout << "Closing engine..." << std::endl;
-    engine.Close();
+    engine.close();
     std::cout << "Engine closed!" << std::endl;
 
     std::cout << "Cleaning up SPDK environment..." << std::endl;
-    SpdkEnv::Instance().Cleanup();
+    SpdkEnv::instance().cleanup();
 
     std::cout << std::endl;
     std::cout << "=== SPSC Example completed! ===" << std::endl;

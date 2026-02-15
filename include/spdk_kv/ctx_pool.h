@@ -19,8 +19,8 @@ namespace spdk_kv {
 //
 // Usage:
 //   CtxPool<MyCtx, 32> pool;
-//   MyCtx* ctx = pool.Alloc(arg1, arg2);  // placement-new from pool
-//   pool.Free(ctx);                         // destruct + return to pool
+//   MyCtx* ctx = pool.alloc(arg1, arg2);  // placement-new from pool
+//   pool.free(ctx);                         // destruct + return to pool
 template <typename T, size_t N = 64>
 class CtxPool {
 public:
@@ -39,7 +39,7 @@ public:
     // Allocate a context object from the pool.
     // Uses aggregate initialization (brace-init) for the object.
     template <typename... Args>
-    T* Alloc(Args&&... args) {
+    T* alloc(Args&&... args) {
         void* slot;
         if (free_count_ > 0) {
             slot = free_list_[--free_count_];
@@ -50,8 +50,8 @@ public:
         return new (slot) T{std::forward<Args>(args)...};
     }
 
-    // Free a context object back to the pool.
-    void Free(T* ptr) {
+    // free a context object back to the pool.
+    void free(T* ptr) {
         if (!ptr) {
             return;
         }
@@ -59,18 +59,18 @@ public:
         if constexpr (!std::is_trivially_destructible_v<T>) {
             ptr->~T();
         }
-        if (IsFromPool(ptr)) {
+        if (is_from_pool(ptr)) {
             free_list_[free_count_++] = ptr;
         } else {
             ::operator delete(ptr);
         }
     }
 
-    size_t Available() const { return free_count_; }
-    static constexpr size_t Capacity() { return N; }
+    size_t available() const { return free_count_; }
+    static constexpr size_t capacity() { return N; }
 
 private:
-    bool IsFromPool(const T* ptr) const {
+    bool is_from_pool(const T* ptr) const {
         auto* base = reinterpret_cast<const char*>(&storage_[0]);
         auto* end = reinterpret_cast<const char*>(&storage_[N]);
         auto* p = reinterpret_cast<const char*>(ptr);
@@ -83,7 +83,7 @@ private:
 };
 
 // Specialization hint: for types that need explicit default-construction
-// (e.g., WritevCtx with iovec array), use Alloc() with no arguments
+// (e.g., WritevCtx with iovec array), use alloc() with no arguments
 // then manually assign fields.
 
 }  // namespace spdk_kv

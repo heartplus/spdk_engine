@@ -22,7 +22,7 @@ using RecoveryCallback = std::function<void(KvError status)>;
 // Scan range for incremental recovery
 struct ScanRange {
     uint16_t file_id;
-    uint64_t start_page;  // Start page index
+    uint64_t start_page;  // start page index
     uint64_t end_page;    // End page index (exclusive)
 };
 
@@ -52,36 +52,36 @@ public:
     IndexLoader(const IndexLoader&) = delete;
     IndexLoader& operator=(const IndexLoader&) = delete;
 
-    // Start async recovery
-    void StartRecovery(RecoveryCallback callback);
+    // start async recovery
+    void start_recovery(RecoveryCallback callback);
 
-    // Poll recovery progress (call in main loop)
+    // poll recovery progress (call in main loop)
     // Returns true if recovery is in progress
-    bool Poll();
+    bool poll();
 
     // Check if recovery is complete
-    bool IsComplete() const { return state_ == State::kDone || state_ == State::kError; }
+    bool is_complete() const { return state_ == State::kDone || state_ == State::kError; }
 
     // Check if recovery succeeded
-    bool IsSuccess() const { return state_ == State::kDone; }
+    bool is_success() const { return state_ == State::kDone; }
 
-    // Get current state
-    State GetState() const { return state_; }
+    // get current state
+    State get_state() const { return state_; }
 
-    // Get last error
-    KvError GetLastError() const { return last_error_; }
+    // get last error
+    KvError get_last_error() const { return last_error_; }
 
-    // Get recovered superblock
-    const Superblock& GetSuperblock() const { return superblock_; }
+    // get recovered superblock
+    const Superblock& get_superblock() const { return superblock_; }
 
-    // Get recovered max sequence
-    uint32_t GetRecoveredMaxSequence() const { return recovered_max_sequence_; }
+    // get recovered max sequence
+    uint32_t get_recovered_max_sequence() const { return recovered_max_sequence_; }
 
-    // Set superblock directly (for pre-loaded superblock)
-    void SetSuperblock(const Superblock& superblock) { superblock_ = superblock; }
+    // set superblock directly (for pre-loaded superblock)
+    void set_superblock(const Superblock& superblock) { superblock_ = superblock; }
 
-    // Set SPDK resources for real IO (blob-based recovery)
-    void SetSpdkResources(spdk_blob_store* blobstore, spdk_io_channel* channel,
+    // set SPDK resources for real IO (blob-based recovery)
+    void set_spdk_resources(spdk_blob_store* blobstore, spdk_io_channel* channel,
                           spdk_blob* superblock_blob, spdk_blob* mem_index_blob_a,
                           spdk_blob* mem_index_blob_b) {
         blobstore_ = blobstore;
@@ -91,53 +91,53 @@ public:
         mem_index_blob_b_ = mem_index_blob_b;
     }
 
-    // Set data blob handles for each file (used during incremental recovery scan)
+    // set data blob handles for each file (used during incremental recovery scan)
     struct DataBlobInfo {
         uint16_t file_id;
         spdk_blob* blob;
         uint64_t size;  // File size in bytes
     };
-    void SetDataBlobs(const std::vector<DataBlobInfo>& blobs) { data_blobs_ = blobs; }
+    void set_data_blobs(const std::vector<DataBlobInfo>& blobs) { data_blobs_ = blobs; }
 
     // Parse and rebuild entries from a buffer
     // Returns the number of entries processed
-    size_t ParseAndRebuildEntries(const void* buffer, size_t buffer_size, uint16_t file_id,
+    size_t parse_and_rebuild_entries(const void* buffer, size_t buffer_size, uint16_t file_id,
                                   uint64_t base_offset);
 
 private:
     // State machine transitions
-    void TransitionTo(State new_state);
+    void transition_to(State new_state);
 
     // Load operations
-    void LoadSuperblockPrimary();
-    void LoadSuperblockBackup();
-    void LoadMemIndexArea(int area);
-    void CompareAndSelectArea();
-    void DeserializeMemIndex(int area);
-    void StartIncrementalRebuild();
-    void FinalizeRecovery();
+    void load_superblock_primary();
+    void load_superblock_backup();
+    void load_mem_index_area(int area);
+    void compare_and_select_area();
+    void deserialize_mem_index(int area);
+    void start_incremental_rebuild();
+    void finalize_recovery();
 
     // Memory dump load (fast path)
-    bool CanUseMemoryDumpLoad() const;
-    void LoadAsMemoryDump(int area);
-    void RebuildPslArray();
+    bool can_use_memory_dump_load() const;
+    void load_as_memory_dump(int area);
+    void rebuild_psl_array();
 
-    // Upsert load (slow path, when capacity changed)
-    void LoadByUpsert(int area);
+    // upsert load (slow path, when capacity changed)
+    void load_by_upsert(int area);
 
     // SPDK blob-based loading
-    void LoadSuperblockFromBlob();
-    void LoadMemIndexAreaFromBlob(int area);
-    void ReadNextMemIndexChunk();
-    void OnMemIndexChunkLoaded(int status);
-    void OnMemIndexAreaLoadComplete();
-    void LoadAsMemoryDumpFromBlob(int area);
-    void LoadByUpsertFromBuffer();
+    void load_superblock_from_blob();
+    void load_mem_index_area_from_blob(int area);
+    void read_next_mem_index_chunk();
+    void on_mem_index_chunk_loaded(int status);
+    void on_mem_index_area_load_complete();
+    void load_as_memory_dump_from_blob(int area);
+    void load_by_upsert_from_buffer();
 
     // Scan data blobs for incremental recovery (real SPDK path)
-    void ScanNextFileBlob();
-    void ScanBlobChunk();
-    void OnScanBlobChunkLoaded(int status);
+    void scan_next_file_blob();
+    void scan_blob_chunk();
+    void on_scan_blob_chunk_loaded(int status);
 
     // Extracted static callbacks for SPDK async IO
     struct SuperblockReadCtx {
@@ -146,13 +146,13 @@ private:
         size_t size;
         bool is_backup;
     };
-    static void OnSuperblockReadComplete(void* arg, int bserrno);
-    static void OnSuperblockBackupReadComplete(void* arg, int bserrno);
+    static void on_superblock_read_complete(void* arg, int bserrno);
+    static void on_superblock_backup_read_complete(void* arg, int bserrno);
 
     struct SegLoadCtx {
         IndexLoader* loader;
     };
-    static void OnDirectSegmentLoaded(void* arg, int bserrno);
+    static void on_direct_segment_loaded(void* arg, int bserrno);
 
     struct ChunkCtx {
         IndexLoader* loader;
@@ -165,20 +165,20 @@ private:
         void* dma_buf;
         size_t read_size;
     };
-    static void OnScanChunkRead(void* arg, int bserrno);
+    static void on_scan_chunk_read(void* arg, int bserrno);
 
     // Check if SPDK resources are available
-    bool HasSpdkResources() const { return blobstore_ != nullptr && io_channel_ != nullptr; }
+    bool has_spdk_resources() const { return blobstore_ != nullptr && io_channel_ != nullptr; }
 
-    // Get physical end of a data blob (in pages)
-    uint64_t GetBlobPhysicalEnd(spdk_blob* blob) const;
+    // get physical end of a data blob (in pages)
+    uint64_t get_blob_physical_end(spdk_blob* blob) const;
 
     // Build scan ranges from blob info
-    std::vector<ScanRange> BuildScanRangesFromBlobs();
+    std::vector<ScanRange> build_scan_ranges_from_blobs();
 
     // Validation
-    bool ValidateSuperblock(const Superblock& sb);
-    bool ValidateChecksum(const void* data, size_t size, uint32_t expected);
+    bool validate_superblock(const Superblock& sb);
+    bool validate_checksum(const void* data, size_t size, uint32_t expected);
 
     // Members
     MemIndex* mem_index_;
@@ -215,7 +215,7 @@ private:
     spdk_blob* mem_index_blob_a_;
     spdk_blob* mem_index_blob_b_;
 
-    // Data blob handles for incremental scan
+    // data blob handles for incremental scan
     std::vector<DataBlobInfo> data_blobs_;
 
     // MemIndex area loading state

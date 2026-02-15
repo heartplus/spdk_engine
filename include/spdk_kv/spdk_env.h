@@ -39,69 +39,69 @@ struct SpdkEnvOpts {
 class SpdkEnv {
 public:
     // Singleton access
-    static SpdkEnv& Instance();
+    static SpdkEnv& instance();
 
-    // Initialize SPDK environment
+    // initialize SPDK environment
     // Returns true on success
-    bool Initialize(const SpdkEnvOpts& opts);
+    bool initialize(const SpdkEnvOpts& opts);
 
-    // Cleanup SPDK environment
-    void Cleanup();
+    // cleanup SPDK environment
+    void cleanup();
 
     // Check if initialized
-    bool IsInitialized() const { return initialized_; }
+    bool is_initialized() const { return initialized_; }
 
-    // Get blob store
-    spdk_blob_store* GetBlobStore() { return blobstore_; }
+    // get blob store
+    spdk_blob_store* get_blob_store() { return blobstore_; }
 
-    // Get IO channel
-    spdk_io_channel* GetIoChannel() { return io_channel_; }
+    // get IO channel
+    spdk_io_channel* get_io_channel() { return io_channel_; }
 
-    // Get NVMe controller
-    spdk_nvme_ctrlr* GetController() { return ctrlr_; }
+    // get NVMe controller
+    spdk_nvme_ctrlr* get_controller() { return ctrlr_; }
 
-    // Get NVMe namespace
-    spdk_nvme_ns* GetNamespace() { return ns_; }
+    // get NVMe namespace
+    spdk_nvme_ns* get_namespace() { return ns_; }
 
-    // Get NVMe queue pair
-    spdk_nvme_qpair* GetQpair() { return qpair_; }
+    // get NVMe queue pair
+    spdk_nvme_qpair* get_qpair() { return qpair_; }
 
     // Allocate blob
     // Callback is called with blob_id on success, SPDK_BLOBID_INVALID on failure
-    void AllocateBlob(uint64_t size, std::function<void(uint64_t blob_id)> callback);
+    void allocate_blob(uint64_t size, std::function<void(uint64_t blob_id)> callback);
 
-    // Open blob
-    void OpenBlob(uint64_t blob_id, std::function<void(spdk_blob* blob)> callback);
+    // open blob
+    void open_blob(uint64_t blob_id, std::function<void(spdk_blob* blob)> callback);
 
-    // Close blob
-    void CloseBlob(spdk_blob* blob, std::function<void(int status)> callback);
+    // close blob
+    void close_blob(spdk_blob* blob, std::function<void(int status)> callback);
 
-    // Delete blob
-    void DeleteBlob(uint64_t blob_id, std::function<void(int status)> callback);
+    // del blob
+    void delete_blob(uint64_t blob_id, std::function<void(int status)> callback);
 
     // Resize blob
-    void ResizeBlob(spdk_blob* blob, uint64_t clusters, std::function<void(int status)> callback);
+    void resize_blob(spdk_blob* blob, uint64_t clusters, std::function<void(int status)> callback);
 
     // Sync blob metadata
-    void SyncBlobMd(spdk_blob* blob, std::function<void(int status)> callback);
+    void sync_blob_md(spdk_blob* blob, std::function<void(int status)> callback);
 
     // Process completions (call in polling loop)
-    int ProcessCompletions(uint32_t max_completions = 32);
+    int process_completions(uint32_t max_completions = 32);
 
     // Allocate DMA memory
-    void* AllocDmaBuffer(size_t size, size_t alignment = kPageSize);
+    void* alloc_dma_buffer(size_t size, size_t alignment = kPageSize);
 
-    // Free DMA memory
-    void FreeDmaBuffer(void* buffer);
+    // free DMA memory
+    void free_dma_buffer(void* buffer);
 
     // Polling loop - process all pending events
-    void Poll();
+    void poll();
 
-    // Start polling thread
-    void StartPolling();
+    // start polling thread
+    void start_polling();
 
     // Stop polling thread
-    void StopPolling();
+    void stop_polling();
 
     // Blob operation context types (moved from local scope for pooling)
     struct BlobAllocCtx {
@@ -132,14 +132,14 @@ private:
     SpdkEnv& operator=(const SpdkEnv&) = delete;
 
     // Internal initialization callbacks
-    static void OnBdevInitComplete(void* arg, int rc);
-    static void OnBlobStoreLoadComplete(void* arg, struct spdk_blob_store* bs, int bserrno);
-    static void OnBlobCreateComplete(void* arg, spdk_blob_id blobid, int bserrno);
-    static void OnBlobOpenComplete(void* arg, struct spdk_blob* blob, int bserrno);
-    static void OnBlobCloseComplete(void* arg, int bserrno);
-    static void OnBlobDeleteComplete(void* arg, int bserrno);
-    static void OnBlobResizeComplete(void* arg, int bserrno);
-    static void OnBlobSyncComplete(void* arg, int bserrno);
+    static void on_bdev_init_complete(void* arg, int rc);
+    static void on_blob_store_load_complete(void* arg, struct spdk_blob_store* bs, int bserrno);
+    static void on_blob_create_complete(void* arg, spdk_blob_id blobid, int bserrno);
+    static void on_blob_open_complete(void* arg, struct spdk_blob* blob, int bserrno);
+    static void on_blob_close_complete(void* arg, int bserrno);
+    static void on_blob_delete_complete(void* arg, int bserrno);
+    static void on_blob_resize_complete(void* arg, int bserrno);
+    static void on_blob_sync_complete(void* arg, int bserrno);
 
     // SPDK resources
     spdk_nvme_ctrlr* ctrlr_;
@@ -166,9 +166,9 @@ private:
 // DMA memory allocator for SPDK
 class DmaAllocator {
 public:
-    static void* Alloc(size_t size, size_t alignment = kPageSize);
-    static void Free(void* ptr);
-    static void* AllocZeroed(size_t size, size_t alignment = kPageSize);
+    static void* alloc(size_t size, size_t alignment = kPageSize);
+    static void free(void* ptr);
+    static void* alloc_zeroed(size_t size, size_t alignment = kPageSize);
 };
 
 }  // namespace spdk_kv

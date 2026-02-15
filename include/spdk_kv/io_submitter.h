@@ -25,7 +25,7 @@ class Engine;
 // IO completion callback
 using IoCompletionCallback = std::function<void(int status)>;
 
-// Write context for tracking pending writes
+// write context for tracking pending writes
 struct WriteContext {
     uint64_t key;
     uint32_t sequence;
@@ -69,33 +69,33 @@ public:
     IoSubmitter(const IoSubmitter&) = delete;
     IoSubmitter& operator=(const IoSubmitter&) = delete;
 
-    // Initialize with SPDK resources
-    bool Initialize(spdk_nvme_ctrlr* ctrlr, spdk_nvme_ns* ns, spdk_blob_store* blobstore,
+    // initialize with SPDK resources
+    bool initialize(spdk_nvme_ctrlr* ctrlr, spdk_nvme_ns* ns, spdk_blob_store* blobstore,
                     uint32_t io_queue_size = 256);
 
-    // Get IO channel
-    spdk_io_channel* GetChannel() { return io_channel_; }
+    // get IO channel
+    spdk_io_channel* get_channel() { return io_channel_; }
 
     // Submit a write request
-    void SubmitWrite(AppendBuffer* buffer, uint64_t file_offset,
+    void submit_write(AppendBuffer* buffer, uint64_t file_offset,
                      const std::vector<WriteContext>& contexts, IoCompletionCallback callback);
 
     // Submit a read request with blob handle
-    void SubmitBlobRead(spdk_blob* blob, uint64_t offset, uint32_t pages, void* buffer,
+    void submit_blob_read(spdk_blob* blob, uint64_t offset, uint32_t pages, void* buffer,
                         IoCompletionCallback callback);
 
     // Process completions (call in polling loop)
     // Returns number of completions processed
-    size_t ProcessCompletions(size_t max_completions = 32);
+    size_t process_completions(size_t max_completions = 32);
 
-    // Get pending write count
-    size_t PendingWriteCount() const { return pending_writes_.size(); }
+    // get pending write count
+    size_t pending_write_count() const { return pending_writes_.size(); }
 
     // Check if there are pending IOs
-    bool HasPendingIo() const { return !pending_writes_.empty(); }
+    bool has_pending_io() const { return !pending_writes_.empty(); }
 
     // Flush pending writes
-    void FlushPendingWrites();
+    void flush_pending_writes();
 
     // IO completion context types (moved from local scope for pooling)
     struct ReadCompletionCtx {
@@ -109,11 +109,11 @@ public:
 
 private:
     // Batch submission
-    void SubmitBatch();
+    void submit_batch();
 
     // Internal completion handlers
-    void OnWriteComplete(int status, const std::vector<WriteContext>& contexts);
-    void OnReadComplete(int status, ReadContext* ctx);
+    void on_write_complete(int status, const std::vector<WriteContext>& contexts);
+    void on_read_complete(int status, ReadContext* ctx);
 
     // SPDK resources
     spdk_nvme_ctrlr* ctrlr_;
@@ -146,12 +146,12 @@ public:
     FlushTrigger() = default;
 
     // Check if immediate flush is needed
-    bool ShouldFlushImmediately(size_t pending_buffers, size_t pending_entries) const {
+    bool should_flush_immediately(size_t pending_buffers, size_t pending_entries) const {
         return pending_buffers >= kBufferThreshold || pending_entries >= kEntryThreshold;
     }
 
     // Check if timeout flush is needed
-    bool ShouldFlushOnTimeout(uint64_t last_flush_ns, uint64_t current_ns,
+    bool should_flush_on_timeout(uint64_t last_flush_ns, uint64_t current_ns,
                               uint64_t timeout_ns = 10000000) const {  // 10ms default
         return (current_ns - last_flush_ns) >= timeout_ns;
     }

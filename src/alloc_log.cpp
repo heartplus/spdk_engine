@@ -23,12 +23,12 @@ AllocLogManager::AllocLogManager()
 
 AllocLogManager::~AllocLogManager() {
     if (page_buf_) {
-        DmaAllocator::Free(page_buf_);
+        DmaAllocator::free(page_buf_);
         page_buf_ = nullptr;
     }
 }
 
-void AllocLogManager::Initialize(spdk_blob* superblock_blob, spdk_io_channel* channel,
+void AllocLogManager::initialize(spdk_blob* superblock_blob, spdk_io_channel* channel,
                                  spdk_blob_store* blobstore, uint32_t head, uint32_t tail,
                                  uint32_t sequence) {
     superblock_blob_ = superblock_blob;
@@ -39,13 +39,13 @@ void AllocLogManager::Initialize(spdk_blob* superblock_blob, spdk_io_channel* ch
     sequence_ = sequence;
 
     // Allocate DMA-aligned buffer for the AllocLog page (4KB)
-    page_buf_ = DmaAllocator::AllocZeroed(kPageSize, kPageSize);
+    page_buf_ = DmaAllocator::alloc_zeroed(kPageSize, kPageSize);
     initialized_ = (page_buf_ != nullptr);
 }
 
-void AllocLogManager::WriteEntry(uint64_t blob_id, uint16_t file_id, uint64_t file_size,
+void AllocLogManager::write_entry(uint64_t blob_id, uint16_t file_id, uint64_t file_size,
                                  std::function<void(int status)> callback) {
-    if (!initialized_ || IsFull()) {
+    if (!initialized_ || is_full()) {
         if (callback) {
             callback(-1);
         }
@@ -63,9 +63,9 @@ void AllocLogManager::WriteEntry(uint64_t blob_id, uint16_t file_id, uint64_t fi
     auto now = std::chrono::system_clock::now().time_since_epoch();
     entry.create_time = std::chrono::duration_cast<std::chrono::seconds>(now).count();
     entry.file_size = file_size;
-    entry.checksum = Crc32::Calculate(&entry, sizeof(AllocLogEntry) - sizeof(uint32_t));
+    entry.checksum = Crc32::calculate(&entry, sizeof(AllocLogEntry) - sizeof(uint32_t));
 
-    // Write to in-memory page buffer at the tail position
+    // write to in-memory page buffer at the tail position
     uint32_t slot = tail_ % kAllocLogCapacity;
     auto* entries = reinterpret_cast<AllocLogEntry*>(page_buf_);
     entries[slot] = entry;
@@ -73,7 +73,7 @@ void AllocLogManager::WriteEntry(uint64_t blob_id, uint16_t file_id, uint64_t fi
     // Advance tail
     tail_++;
 
-    // Write the entire page to superblock blob at kAllocLogAreaOffset
+    // write the entire page to superblock blob at kAllocLogAreaOffset
     if (!superblock_blob_ || !channel_ || !blobstore_) {
         // No SPDK resources: in-memory only (for testing)
         if (callback) {
@@ -86,14 +86,14 @@ void AllocLogManager::WriteEntry(uint64_t blob_id, uint16_t file_id, uint64_t fi
     uint64_t offset_units = kAllocLogAreaOffset / io_unit_size;
     uint64_t length_units = kPageSize / io_unit_size;
 
-    auto* ctx = write_ctx_pool_.Alloc(std::move(callback), this);
+    auto* ctx = write_ctx_pool_.alloc(std::move(callback), this);
 
     spdk_blob_io_write(
             superblock_blob_, channel_, page_buf_, offset_units, length_units,
             [](void* arg, int bserrno) {
                 auto* ctx = static_cast<AllocLogWriteCtx*>(arg);
                 auto cb = std::move(ctx->callback);
-                ctx->mgr->write_ctx_pool_.Free(ctx);
+                ctx->mgr->write_ctx_pool_.free(ctx);
                 if (cb) {
                     cb(bserrno);
                 }
@@ -101,7 +101,7 @@ void AllocLogManager::WriteEntry(uint64_t blob_id, uint16_t file_id, uint64_t fi
             ctx);
 }
 
-void AllocLogManager::LoadEntries(
+void AllocLogManager::load_entries(
         uint32_t checkpoint_sequence,
         std::function<void(int status, const std::vector<AllocLogEntry>& entries)> callback) {
     if (!initialized_) {
@@ -127,7 +127,7 @@ void AllocLogManager::LoadEntries(
             }
 
             uint32_t computed =
-                    Crc32::Calculate(&e, sizeof(AllocLogEntry) - sizeof(uint32_t));
+                    Crc32::calculate(&e, sizeof(AllocLogEntry) - sizeof(uint32_t));
             if (computed != e.checksum) {
                 break;
             }
@@ -157,19 +157,19 @@ void AllocLogManager::LoadEntries(
     uint64_t offset_units = kAllocLogAreaOffset / io_unit_size;
     uint64_t length_units = kPageSize / io_unit_size;
 
-    auto* ctx = load_entries_ctx_pool_.Alloc(this, checkpoint_sequence, std::move(callback));
+    auto* ctx = load_entries_ctx_pool_.alloc(this, checkpoint_sequence, std::move(callback));
 
     spdk_blob_io_read(superblock_blob_, channel_, page_buf_, offset_units, length_units,
-                      OnAllocLogPageRead, ctx);
+                      on_alloc_log_page_read, ctx);
 }
 
-void AllocLogManager::OnAllocLogPageRead(void* arg, int bserrno) {
+void AllocLogManager::on_alloc_log_page_read(void* arg, int bserrno) {
     auto* ctx = static_cast<LoadEntriesReadCtx*>(arg);
     std::vector<AllocLogEntry> result;
 
     if (bserrno != 0) {
         auto cb = std::move(ctx->callback);
-        ctx->mgr->load_entries_ctx_pool_.Free(ctx);
+        ctx->mgr->load_entries_ctx_pool_.free(ctx);
         if (cb) {
             cb(bserrno, result);
         }
@@ -190,7 +190,7 @@ void AllocLogManager::OnAllocLogPageRead(void* arg, int bserrno) {
         }
 
         uint32_t computed =
-                Crc32::Calculate(&e, sizeof(AllocLogEntry) - sizeof(uint32_t));
+                Crc32::calculate(&e, sizeof(AllocLogEntry) - sizeof(uint32_t));
         if (computed != e.checksum) {
             break;
         }
@@ -210,25 +210,25 @@ void AllocLogManager::OnAllocLogPageRead(void* arg, int bserrno) {
     }
 
     auto cb = std::move(ctx->callback);
-    ctx->mgr->load_entries_ctx_pool_.Free(ctx);
+    ctx->mgr->load_entries_ctx_pool_.free(ctx);
     if (cb) {
         cb(0, result);
     }
 }
 
-void AllocLogManager::Reclaim() {
+void AllocLogManager::reclaim() {
     // Advance head to tail, logically emptying the log.
     // Physical page data remains but will be overwritten by future entries.
     // The head/tail values are persisted to superblock during checkpoint.
     head_ = tail_;
 }
 
-bool AllocLogManager::IsNearFull() const {
-    return UsedCount() >= kAllocLogNearFullThreshold;
+bool AllocLogManager::is_near_full() const {
+    return used_count() >= kAllocLogNearFullThreshold;
 }
 
-bool AllocLogManager::IsFull() const {
-    return UsedCount() >= kAllocLogCapacity;
+bool AllocLogManager::is_full() const {
+    return used_count() >= kAllocLogCapacity;
 }
 
 }  // namespace spdk_kv

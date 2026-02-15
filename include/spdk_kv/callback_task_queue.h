@@ -35,8 +35,8 @@ public:
     CallbackTaskQueue(const CallbackTaskQueue&) = delete;
     CallbackTaskQueue& operator=(const CallbackTaskQueue&) = delete;
 
-    // Enqueue a task (called from IO callbacks, non-blocking)
-    bool Enqueue(const Task& task) {
+    // enqueue a task (called from IO callbacks, non-blocking)
+    bool enqueue(const Task& task) {
         size_t next_head = (head_ + 1) % kCapacity;
         if (next_head == tail_) {
             return false;  // Queue full
@@ -48,7 +48,7 @@ public:
 
     // Process tasks in batch (called from main polling loop)
     // Returns number of tasks processed
-    size_t ProcessTasks(size_t max_tasks = 64) {
+    size_t process_tasks(size_t max_tasks = 64) {
         size_t processed = 0;
         while (processed < max_tasks && tail_ != head_) {
             Task& task = tasks_[tail_];
@@ -62,10 +62,10 @@ public:
     }
 
     // Check if queue is empty
-    bool IsEmpty() const { return head_ == tail_; }
+    bool is_empty() const { return head_ == tail_; }
 
-    // Get number of pending tasks
-    size_t Count() const {
+    // get number of pending tasks
+    size_t count() const {
         if (head_ >= tail_) {
             return head_ - tail_;
         }

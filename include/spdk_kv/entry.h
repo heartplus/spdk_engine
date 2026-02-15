@@ -16,7 +16,7 @@ struct EntryHeader {
     uint16_t version;   // Version number
     uint8_t flags;      // Flags (bit0: deleted, bit1: compaction)
     uint8_t reserved;   // Reserved
-    uint32_t sequence;  // Write sequence number (persisted)
+    uint32_t sequence;  // write sequence number (persisted)
     uint32_t padding;   // Padding to 16 bytes
 
     bool is_deleted() const { return (flags & kFlagDeleted) != 0; }
@@ -26,7 +26,7 @@ struct EntryHeader {
 
 static_assert(sizeof(EntryHeader) == 16, "EntryHeader must be 16 bytes");
 
-// Data file header structure (4KB)
+// data file header structure (4KB)
 struct DataFileHeader {
     uint32_t magic;         // Magic number 0x53504446 ("SPDF")
     uint32_t version;       // Version number
@@ -54,14 +54,14 @@ struct __attribute__((packed)) MemIndexEntry {
     // Bit field packing (4 bytes)
     uint32_t file_id : 10;       // File ID (supports 1024 files)
     uint32_t offset_index : 21;  // Offset index (in 4KB units, supports 8GB)
-    uint32_t deleted : 1;        // Delete marker
+    uint32_t deleted : 1;        // del marker
 
     // Sequence number (4 bytes) - full 32-bit
-    uint32_t sequence;  // Write sequence number
+    uint32_t sequence;  // write sequence number
 
     // page_count and tag (4 bytes)
     uint16_t page_count;  // Number of 4KB pages
-    uint8_t tag;          // Hash fingerprint (for fast filtering)
+    uint8_t tag;          // hash fingerprint (for fast filtering)
     uint8_t reserved;     // Reserved
 
     bool is_deleted() const { return deleted != 0; }
@@ -133,7 +133,7 @@ struct Superblock {
     uint64_t last_mount_time;  // Last mount time
 
     uint64_t total_capacity;  // Total capacity
-    uint64_t data_file_size;  // Data file size
+    uint64_t data_file_size;  // data file size
     uint32_t alignment_unit;  // Alignment unit
 
     uint64_t mem_index_blob_a;      // MemIndex Area A blob ID
@@ -172,7 +172,7 @@ struct Superblock {
 // Pending write structure
 struct PendingWrite {
     uint64_t key;
-    uint32_t sequence;       // Write sequence number
+    uint32_t sequence;       // write sequence number
     uint32_t buffer_offset;  // Offset in AppendBuffer
     uint32_t aligned_size;   // Aligned size
     uint8_t flags;           // Flags (bit0: is_compaction)
@@ -261,9 +261,9 @@ struct SerializedMemIndexHeader {
     uint32_t magic;            // 0x4D494458 ("MIDX")
     uint32_t version;          // Version
     uint64_t entry_count;      // Valid entry count
-    uint64_t capacity;         // Hash table capacity
+    uint64_t capacity;         // hash table capacity
     uint64_t global_sequence;  // Global sequence number
-    uint32_t checksum;         // Data checksum
+    uint32_t checksum;         // data checksum
     uint8_t padding[28];       // Padding to 64 bytes
 };
 

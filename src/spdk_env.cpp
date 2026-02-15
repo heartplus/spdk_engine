@@ -13,7 +13,7 @@ namespace spdk_kv {
 // SpdkEnv implementation
 // ============================================================================
 
-SpdkEnv& SpdkEnv::Instance() {
+SpdkEnv& SpdkEnv::instance() {
     static SpdkEnv instance;
     return instance;
 }
@@ -31,18 +31,18 @@ SpdkEnv::SpdkEnv()
 
 SpdkEnv::~SpdkEnv() {
     if (initialized_) {
-        Cleanup();
+        cleanup();
     }
 }
 
-bool SpdkEnv::Initialize(const SpdkEnvOpts& opts) {
+bool SpdkEnv::initialize(const SpdkEnvOpts& opts) {
     if (initialized_) {
         return true;
     }
 
     opts_ = opts;
 
-    // Initialize SPDK environment
+    // initialize SPDK environment
     struct spdk_env_opts spdk_opts;
     spdk_env_opts_init(&spdk_opts);
 
@@ -61,7 +61,7 @@ bool SpdkEnv::Initialize(const SpdkEnvOpts& opts) {
         return false;
     }
 
-    // Open bdev - bdev_name is required
+    // open bdev - bdev_name is required
     if (opts.bdev_name.empty()) {
         spdk_env_fini();
         return false;
@@ -79,7 +79,7 @@ bool SpdkEnv::Initialize(const SpdkEnvOpts& opts) {
         return false;
     }
 
-    // Create blob store device from bdev
+    // create blob store device from bdev
     struct spdk_bs_dev* bs_dev = nullptr;
     rc = spdk_bdev_create_bs_dev_ext(opts.bdev_name.c_str(), nullptr, nullptr, &bs_dev);
     if (rc < 0 || !bs_dev) {
@@ -97,7 +97,7 @@ bool SpdkEnv::Initialize(const SpdkEnvOpts& opts) {
     };
     BsLoadCtx load_ctx = {nullptr, 0, false};
 
-    spdk_bs_load(bs_dev, nullptr, OnBlobStoreLoadComplete, &load_ctx);
+    spdk_bs_load(bs_dev, nullptr, on_blob_store_load_complete, &load_ctx);
 
     // Wait for completion (in real usage, this would be in the event loop)
     while (!load_ctx.done) {
@@ -117,7 +117,7 @@ bool SpdkEnv::Initialize(const SpdkEnvOpts& opts) {
     return true;
 }
 
-void SpdkEnv::Cleanup() {
+void SpdkEnv::cleanup() {
     if (!initialized_) {
         return;
     }
@@ -165,39 +165,39 @@ void SpdkEnv::Cleanup() {
     initialized_ = false;
 }
 
-void SpdkEnv::Poll() {
+void SpdkEnv::poll() {
     // Process completions
     if (qpair_) {
         spdk_nvme_qpair_process_completions(qpair_, 0);
     }
 }
 
-void SpdkEnv::StartPolling() { polling_ = true; }
+void SpdkEnv::start_polling() { polling_ = true; }
 
-void SpdkEnv::StopPolling() { polling_ = false; }
+void SpdkEnv::stop_polling() { polling_ = false; }
 
-int SpdkEnv::ProcessCompletions(uint32_t max_completions) {
+int SpdkEnv::process_completions(uint32_t max_completions) {
     if (!qpair_) {
         return 0;
     }
     return spdk_nvme_qpair_process_completions(qpair_, max_completions);
 }
 
-void* SpdkEnv::AllocDmaBuffer(size_t size, size_t alignment) {
+void* SpdkEnv::alloc_dma_buffer(size_t size, size_t alignment) {
     return spdk_dma_zmalloc(size, alignment, nullptr);
 }
 
-void SpdkEnv::FreeDmaBuffer(void* buffer) { spdk_dma_free(buffer); }
+void SpdkEnv::free_dma_buffer(void* buffer) { spdk_dma_free(buffer); }
 
-void SpdkEnv::AllocateBlob(uint64_t size, std::function<void(uint64_t blob_id)> callback) {
+void SpdkEnv::allocate_blob(uint64_t size, std::function<void(uint64_t blob_id)> callback) {
     if (!blobstore_) {
         callback(SPDK_BLOBID_INVALID);
         return;
     }
 
-    auto* ctx = blob_alloc_ctx_pool_.Alloc(std::move(callback));
+    auto* ctx = blob_alloc_ctx_pool_.alloc(std::move(callback));
 
-    // Calculate clusters needed
+    // calculate clusters needed
     uint64_t cluster_size = spdk_bs_get_cluster_size(blobstore_);
     uint64_t clusters = (size + cluster_size - 1) / cluster_size;
 
@@ -205,73 +205,73 @@ void SpdkEnv::AllocateBlob(uint64_t size, std::function<void(uint64_t blob_id)> 
     spdk_blob_opts_init(&opts, sizeof(opts));
     opts.num_clusters = clusters;
 
-    spdk_bs_create_blob_ext(blobstore_, &opts, OnBlobCreateComplete, ctx);
+    spdk_bs_create_blob_ext(blobstore_, &opts, on_blob_create_complete, ctx);
 }
 
-void SpdkEnv::OpenBlob(uint64_t blob_id, std::function<void(spdk_blob* blob)> callback) {
+void SpdkEnv::open_blob(uint64_t blob_id, std::function<void(spdk_blob* blob)> callback) {
     if (!blobstore_) {
         callback(nullptr);
         return;
     }
 
-    auto* ctx = blob_open_ctx_pool_.Alloc(std::move(callback));
+    auto* ctx = blob_open_ctx_pool_.alloc(std::move(callback));
 
-    spdk_bs_open_blob(blobstore_, blob_id, OnBlobOpenComplete, ctx);
+    spdk_bs_open_blob(blobstore_, blob_id, on_blob_open_complete, ctx);
 }
 
-void SpdkEnv::CloseBlob(spdk_blob* blob, std::function<void(int status)> callback) {
+void SpdkEnv::close_blob(spdk_blob* blob, std::function<void(int status)> callback) {
     if (!blob) {
         callback(-1);
         return;
     }
 
-    auto* ctx = blob_close_ctx_pool_.Alloc(std::move(callback));
+    auto* ctx = blob_close_ctx_pool_.alloc(std::move(callback));
 
-    spdk_blob_close(blob, OnBlobCloseComplete, ctx);
+    spdk_blob_close(blob, on_blob_close_complete, ctx);
 }
 
-void SpdkEnv::DeleteBlob(uint64_t blob_id, std::function<void(int status)> callback) {
+void SpdkEnv::delete_blob(uint64_t blob_id, std::function<void(int status)> callback) {
     if (!blobstore_) {
         callback(-1);
         return;
     }
 
-    auto* ctx = blob_delete_ctx_pool_.Alloc(std::move(callback));
+    auto* ctx = blob_delete_ctx_pool_.alloc(std::move(callback));
 
-    spdk_bs_delete_blob(blobstore_, blob_id, OnBlobDeleteComplete, ctx);
+    spdk_bs_delete_blob(blobstore_, blob_id, on_blob_delete_complete, ctx);
 }
 
-void SpdkEnv::ResizeBlob(spdk_blob* blob, uint64_t clusters,
+void SpdkEnv::resize_blob(spdk_blob* blob, uint64_t clusters,
                          std::function<void(int status)> callback) {
     if (!blob) {
         callback(-1);
         return;
     }
 
-    auto* ctx = blob_resize_ctx_pool_.Alloc(std::move(callback));
+    auto* ctx = blob_resize_ctx_pool_.alloc(std::move(callback));
 
-    spdk_blob_resize(blob, clusters, OnBlobResizeComplete, ctx);
+    spdk_blob_resize(blob, clusters, on_blob_resize_complete, ctx);
 }
 
-void SpdkEnv::SyncBlobMd(spdk_blob* blob, std::function<void(int status)> callback) {
+void SpdkEnv::sync_blob_md(spdk_blob* blob, std::function<void(int status)> callback) {
     if (!blob) {
         callback(-1);
         return;
     }
 
-    auto* ctx = blob_sync_ctx_pool_.Alloc(std::move(callback));
+    auto* ctx = blob_sync_ctx_pool_.alloc(std::move(callback));
 
-    spdk_blob_sync_md(blob, OnBlobSyncComplete, ctx);
+    spdk_blob_sync_md(blob, on_blob_sync_complete, ctx);
 }
 
 // Static callbacks
-void SpdkEnv::OnBdevInitComplete(void* arg, int rc) {
+void SpdkEnv::on_bdev_init_complete(void* arg, int rc) {
     (void)arg;
     (void)rc;
 }
 
-void SpdkEnv::OnBlobStoreLoadComplete(void* arg, struct spdk_blob_store* bs, int bserrno) {
-    // BsLoadCtx is defined in Initialize() with same layout
+void SpdkEnv::on_blob_store_load_complete(void* arg, struct spdk_blob_store* bs, int bserrno) {
+    // BsLoadCtx is defined in initialize() with same layout
     struct BsLoadCtx {
         spdk_blob_store* bs;
         int rc;
@@ -283,10 +283,10 @@ void SpdkEnv::OnBlobStoreLoadComplete(void* arg, struct spdk_blob_store* bs, int
     ctx->done = true;
 }
 
-void SpdkEnv::OnBlobCreateComplete(void* arg, spdk_blob_id blobid, int bserrno) {
+void SpdkEnv::on_blob_create_complete(void* arg, spdk_blob_id blobid, int bserrno) {
     auto* ctx = static_cast<BlobAllocCtx*>(arg);
     auto cb = std::move(ctx->callback);
-    Instance().blob_alloc_ctx_pool_.Free(ctx);
+    instance().blob_alloc_ctx_pool_.free(ctx);
     if (bserrno == 0) {
         cb(blobid);
     } else {
@@ -294,10 +294,10 @@ void SpdkEnv::OnBlobCreateComplete(void* arg, spdk_blob_id blobid, int bserrno) 
     }
 }
 
-void SpdkEnv::OnBlobOpenComplete(void* arg, struct spdk_blob* blob, int bserrno) {
+void SpdkEnv::on_blob_open_complete(void* arg, struct spdk_blob* blob, int bserrno) {
     auto* ctx = static_cast<BlobOpenCtx*>(arg);
     auto cb = std::move(ctx->callback);
-    Instance().blob_open_ctx_pool_.Free(ctx);
+    instance().blob_open_ctx_pool_.free(ctx);
     if (bserrno == 0) {
         cb(blob);
     } else {
@@ -305,31 +305,31 @@ void SpdkEnv::OnBlobOpenComplete(void* arg, struct spdk_blob* blob, int bserrno)
     }
 }
 
-void SpdkEnv::OnBlobCloseComplete(void* arg, int bserrno) {
+void SpdkEnv::on_blob_close_complete(void* arg, int bserrno) {
     auto* ctx = static_cast<BlobCloseCtx*>(arg);
     auto cb = std::move(ctx->callback);
-    Instance().blob_close_ctx_pool_.Free(ctx);
+    instance().blob_close_ctx_pool_.free(ctx);
     cb(bserrno);
 }
 
-void SpdkEnv::OnBlobDeleteComplete(void* arg, int bserrno) {
+void SpdkEnv::on_blob_delete_complete(void* arg, int bserrno) {
     auto* ctx = static_cast<BlobDeleteCtx*>(arg);
     auto cb = std::move(ctx->callback);
-    Instance().blob_delete_ctx_pool_.Free(ctx);
+    instance().blob_delete_ctx_pool_.free(ctx);
     cb(bserrno);
 }
 
-void SpdkEnv::OnBlobResizeComplete(void* arg, int bserrno) {
+void SpdkEnv::on_blob_resize_complete(void* arg, int bserrno) {
     auto* ctx = static_cast<BlobResizeCtx*>(arg);
     auto cb = std::move(ctx->callback);
-    Instance().blob_resize_ctx_pool_.Free(ctx);
+    instance().blob_resize_ctx_pool_.free(ctx);
     cb(bserrno);
 }
 
-void SpdkEnv::OnBlobSyncComplete(void* arg, int bserrno) {
+void SpdkEnv::on_blob_sync_complete(void* arg, int bserrno) {
     auto* ctx = static_cast<BlobSyncCtx*>(arg);
     auto cb = std::move(ctx->callback);
-    Instance().blob_sync_ctx_pool_.Free(ctx);
+    instance().blob_sync_ctx_pool_.free(ctx);
     cb(bserrno);
 }
 
@@ -337,18 +337,18 @@ void SpdkEnv::OnBlobSyncComplete(void* arg, int bserrno) {
 // DmaAllocator implementation
 // ============================================================================
 
-void* DmaAllocator::Alloc(size_t size, size_t alignment) {
+void* DmaAllocator::alloc(size_t size, size_t alignment) {
     return spdk_dma_malloc(size, alignment, nullptr);
 }
 
-void DmaAllocator::Free(void* ptr) {
+void DmaAllocator::free(void* ptr) {
     if (!ptr) {
         return;
     }
     spdk_dma_free(ptr);
 }
 
-void* DmaAllocator::AllocZeroed(size_t size, size_t alignment) {
+void* DmaAllocator::alloc_zeroed(size_t size, size_t alignment) {
     return spdk_dma_zmalloc(size, alignment, nullptr);
 }
 

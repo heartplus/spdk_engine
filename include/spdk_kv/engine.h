@@ -27,7 +27,7 @@ namespace spdk_kv {
 
 // Engine configuration
 struct EngineConfig {
-    // Capacity config
+    // capacity config
     uint64_t max_capacity = kMaxCapacity;        // 8TB
     uint64_t data_file_size = kDefaultFileSize;  // 8GB
 
@@ -46,13 +46,13 @@ struct EngineConfig {
     uint32_t checkpoint_dirty_segment_threshold = 8;
 };
 
-// Create options
+// create options
 struct CreateOpts {
     EngineConfig config;
     bool force = false;  // Force create even if exists
 };
 
-// Open options
+// open options
 struct OpenOpts {
     bool read_only = false;
     bool recover = true;
@@ -78,8 +78,8 @@ struct FileInfo {
               blob(nullptr),
               blob_opened(false) {}
 
-    bool IsWritable() const { return state == FileState::kActive; }
-    bool IsReadable() const {
+    bool is_writable() const { return state == FileState::kActive; }
+    bool is_readable() const {
         return state == FileState::kActive || state == FileState::kSealed ||
                state == FileState::kCompacting;
     }
@@ -104,121 +104,121 @@ public:
     Engine& operator=(const Engine&) = delete;
 
     // Lifecycle operations (synchronous)
-    KvError Create(const std::string& path, const CreateOpts& opts);
-    KvError Open(const std::string& path, const OpenOpts& opts);
-    KvError Close();
+    KvError create(const std::string& path, const CreateOpts& opts);
+    KvError open(const std::string& path, const OpenOpts& opts);
+    KvError close();
 
     // KV operations (synchronous)
-    KvError Put(uint64_t key, const void* value, uint32_t value_len);
-    KvError Get(uint64_t key, void* value_buf, uint32_t buf_len, uint32_t* actual_len);
-    KvError Delete(uint64_t key);
+    KvError put(uint64_t key, const void* value, uint32_t value_len);
+    KvError get(uint64_t key, void* value_buf, uint32_t buf_len, uint32_t* actual_len);
+    KvError del(uint64_t key);
 
     // 第一个segment，最前面的256byte 为用户数据，不能写入
     // 从256 到 512byte 之间，可以用来存放entry header + key + value_len + crcofvalue
     // 写入盘时，从0开始写入整个segment
-    void PutAsync(uint64_t key, SegmentBuf input_buf, KvCallback cb, void* cb_arg);
+    void put_async(uint64_t key, SegmentBuf input_buf, KvCallback cb, void* cb_arg);
     // output buf中为输出的内存地址
     // 每段内存均为4K地址对齐，可以用来直接DMA读写
     // 实际读取的值长度通过cb参数返回，用户根据实际长度使用对应的内存区域
     // 要求从nvme 上读取的数据，包含前面256byte的头部，以及 256-512byte的entry header + key +
     // value_len + crc等信息 用户会自行剔除前512byte的头部，获取真正的value数据
-    void GetAsync(uint64_t key, SegmentBuf* output, KvGetCallback cb, void* cb_arg);
-    void DeleteAsync(uint64_t key, KvCallback cb, void* cb_arg);
+    void get_async(uint64_t key, SegmentBuf* output, KvGetCallback cb, void* cb_arg);
+    void delete_async(uint64_t key, KvCallback cb, void* cb_arg);
 
     // Polling (call in main loop to process IO completions)
-    void Poll();
+    void poll();
 
     // Status
-    EngineState GetState() const { return state_; }
-    bool IsReady() const { return state_ == EngineState::kReady; }
+    EngineState get_state() const { return state_; }
+    bool is_ready() const { return state_ == EngineState::kReady; }
 
     // Statistics
-    uint64_t GetEntryCount() const;
-    uint64_t GetTotalDataBytes() const;
-    double GetIndexLoadFactor() const;
+    uint64_t get_entry_count() const;
+    uint64_t get_total_data_bytes() const;
+    double get_index_load_factor() const;
 
     // For internal/testing use
-    MemIndex* GetMemIndex() { return mem_index_.get(); }
-    const MemIndex* GetMemIndex() const { return mem_index_.get(); }
+    MemIndex* get_mem_index() { return mem_index_.get(); }
+    const MemIndex* get_mem_index() const { return mem_index_.get(); }
 
     // Callback task queue (for deferred operations from IO callbacks)
-    CallbackTaskQueue& GetTaskQueue() { return task_queue_; }
+    CallbackTaskQueue& get_task_queue() { return task_queue_; }
 
     // Checkpoint operations
-    void StartCheckpoint(KvCallback cb, void* cb_arg);
-    bool IsCheckpointInProgress() const;
-    void CheckCheckpointTrigger();
+    void start_checkpoint(KvCallback cb, void* cb_arg);
+    bool is_checkpoint_in_progress() const;
+    void check_checkpoint_trigger();
 
     // Compaction operations
-    void ScheduleCompaction(uint16_t file_id);
-    void SetCompactionEnabled(bool enabled) { compaction_enabled_ = enabled; }
-    bool IsCompactionEnabled() const { return compaction_enabled_; }
-    size_t GetGarbageRatio() const;
+    void schedule_compaction(uint16_t file_id);
+    void set_compaction_enabled(bool enabled) { compaction_enabled_ = enabled; }
+    bool is_compaction_enabled() const { return compaction_enabled_; }
+    size_t get_garbage_ratio() const;
 
-    // Get pending foreground request count (for compaction priority)
-    size_t GetPendingForegroundCount() const { return pending_foreground_count_; }
+    // get pending foreground request count (for compaction priority)
+    size_t get_pending_foreground_count() const { return pending_foreground_count_; }
 
-    // Get file metadata (for compaction)
-    FileMetadata* GetFileMetadata(uint16_t file_id);
-    const std::unordered_map<uint16_t, FileMetadata>& GetFileMetadataMap() const;
+    // get file metadata (for compaction)
+    FileMetadata* get_file_metadata(uint16_t file_id);
+    const std::unordered_map<uint16_t, FileMetadata>& get_file_metadata_map() const;
 
-    // Remove a file after compaction (close blob, delete blob, erase metadata)
-    void CompactionRemoveFile(uint16_t file_id, std::function<void(bool)> callback);
+    // remove a file after compaction (close blob, delete blob, erase metadata)
+    void compaction_remove_file(uint16_t file_id, std::function<void(bool)> callback);
 
     // RDMA two-phase commit interface
-    void BuildEntryInplaceRdma(void* slot, uint64_t key, uint32_t len, uint32_t seq,
+    void build_entry_inplace_rdma(void* slot, uint64_t key, uint32_t len, uint32_t seq,
                                bool is_tombstone = false);
-    int AllocRdmaSlot(uint32_t value_len, RdmaSlot* out_slot);
-    int CommitRdmaSlot(uint32_t slot_id, uint32_t epoch);
-    void PutRdma(uint64_t key, void* dma_buffer, uint32_t value_offset, uint32_t len, uint32_t seq,
+    int alloc_rdma_slot(uint32_t value_len, RdmaSlot* out_slot);
+    int commit_rdma_slot(uint32_t slot_id, uint32_t epoch);
+    void put_rdma(uint64_t key, void* dma_buffer, uint32_t value_offset, uint32_t len, uint32_t seq,
                  KvCallback cb, void* cb_arg);
 
-    // Vectored put (placeholder, delegates to PutAsync)
-    void PutVectored(uint64_t key, void* value, uint32_t len, KvCallback cb, void* cb_arg);
+    // Vectored put (placeholder, delegates to put_async)
+    void put_vectored(uint64_t key, void* value, uint32_t len, KvCallback cb, void* cb_arg);
 
     // AppendBuffer-based IO merge path
-    void PutBuffered(uint64_t key, const void* value, uint32_t value_len, KvCallback cb,
+    void put_buffered(uint64_t key, const void* value, uint32_t value_len, KvCallback cb,
                      void* cb_arg);
 
 private:
     // Internal helpers
-    KvError InitializeNew(const CreateOpts& opts);
-    KvError LoadExisting(const OpenOpts& opts);
-    KvError Recover();
-    KvError LoadSuperblock();
-    KvError RebuildFileInfo();
-    KvError RecoverMemIndex();
+    KvError initialize_new(const CreateOpts& opts);
+    KvError load_existing(const OpenOpts& opts);
+    KvError recover();
+    KvError load_superblock();
+    KvError rebuild_file_info();
+    KvError recover_mem_index();
 
     // File management
-    FileInfo* GetActiveFile();
-    FileInfo* GetFile(uint16_t file_id);
-    FileInfo* AllocateNewFile();
+    FileInfo* get_active_file();
+    FileInfo* get_file(uint16_t file_id);
+    FileInfo* allocate_new_file();
 
     // SPDK blob management
-    void AllocateBlobForFile(FileInfo* file, std::function<void(bool success)> callback);
-    void OpenBlobForFile(FileInfo* file, std::function<void(bool success)> callback);
-    void CloseBlobForFile(FileInfo* file, std::function<void(bool success)> callback);
+    void allocate_blob_for_file(FileInfo* file, std::function<void(bool success)> callback);
+    void open_blob_for_file(FileInfo* file, std::function<void(bool success)> callback);
+    void close_blob_for_file(FileInfo* file, std::function<void(bool success)> callback);
 
     // SPDK async IO operations
-    void SubmitBlobWrite(FileInfo* file, uint64_t offset, void* data, uint32_t length,
+    void submit_blob_write(FileInfo* file, uint64_t offset, void* data, uint32_t length,
                          std::function<void(int status)> callback);
-    void SubmitBlobWritev(FileInfo* file, uint64_t offset, const SegmentBuf& buf,
+    void submit_blob_writev(FileInfo* file, uint64_t offset, const SegmentBuf& buf,
                           uint32_t total_length, std::function<void(int status)> callback);
-    void SubmitBlobRead(FileInfo* file, uint64_t offset, void* buffer, uint32_t length,
+    void submit_blob_read(FileInfo* file, uint64_t offset, void* buffer, uint32_t length,
                         std::function<void(int status)> callback);
-    void SubmitBlobReadv(FileInfo* file, uint64_t offset, const SegmentBuf& buf,
+    void submit_blob_readv(FileInfo* file, uint64_t offset, const SegmentBuf& buf,
                          uint32_t total_length, std::function<void(int status)> callback);
 
-    // Get SPDK blob for a file
-    spdk_blob* GetBlobForFile(uint16_t file_id);
+    // get SPDK blob for a file
+    spdk_blob* get_blob_for_file(uint16_t file_id);
 
     // Superblock blob management
-    KvError CreateSuperblockBlob();
-    KvError WriteSuperblock();
-    void UpdateSuperblockFileMapping(FileInfo* file);
+    KvError create_superblock_blob();
+    KvError write_superblock();
+    void update_superblock_file_mapping(FileInfo* file);
 
     // Entry building
-    void BuildEntryInplace(void* slot, uint64_t key, const void* value, uint32_t len, uint32_t seq,
+    void build_entry_inplace(void* slot, uint64_t key, const void* value, uint32_t len, uint32_t seq,
                            bool is_tombstone = false);
 
     // Async IO completion contexts and handlers
@@ -229,17 +229,17 @@ private:
         KvGetCallback cb;
         void* cb_arg;
     };
-    void HandleGetReadCompletion(int status, GetReadCompletionCtx* ctx);
+    void handle_get_read_completion(int status, GetReadCompletionCtx* ctx);
 
     struct OpenBlobForFileCtx {
         Engine* engine;
         FileInfo* file;
         std::function<void(bool success)> callback;
     };
-    void HandleBlobOpenedForFile(spdk_blob* blob, OpenBlobForFileCtx* ctx);
+    void handle_blob_opened_for_file(spdk_blob* blob, OpenBlobForFileCtx* ctx);
 
     // Index update
-    void UpdateIndexOnWriteComplete(uint64_t key, const MemIndexEntry& entry, bool is_compaction,
+    void update_index_on_write_complete(uint64_t key, const MemIndexEntry& entry, bool is_compaction,
                                     uint16_t old_file_id, uint32_t old_offset_index);
 
     // Pending write request queued during async file allocation
@@ -259,23 +259,23 @@ private:
     };
 
     // Async file allocation
-    void AllocateNewFileAsync();
-    void OnNewFileAllocated(bool success);
-    void ProcessPendingWriteQueue();
-    void SubmitQueuedWrite(PendingWriteRequest& req, FileInfo* file);
+    void allocate_new_file_async();
+    void on_new_file_allocated(bool success);
+    void process_pending_write_queue();
+    void submit_queued_write(PendingWriteRequest& req, FileInfo* file);
 
     // Fill PendingWriteRequest helpers
-    void FillPendingWriteReq(PendingWriteRequest& req, uint64_t key, void* dma_buffer,
+    void fill_pending_write_req(PendingWriteRequest& req, uint64_t key, void* dma_buffer,
                              uint32_t aligned_size, uint32_t sequence, uint16_t page_count,
                              uint8_t tag, KvCallback cb, void* cb_arg, bool is_delete,
                              uint64_t old_garbage_size);
-    void FillPendingWriteReq(PendingWriteRequest& req, uint64_t key, const SegmentBuf& segment_buf,
+    void fill_pending_write_req(PendingWriteRequest& req, uint64_t key, const SegmentBuf& segment_buf,
                              uint32_t aligned_size, uint32_t sequence, uint16_t page_count,
                              uint8_t tag, KvCallback cb, void* cb_arg);
-    void FillPendingWriteReq(PendingWriteRequest& req, const WaitQueueEntry& wqe);
+    void fill_pending_write_req(PendingWriteRequest& req, const WaitQueueEntry& wqe);
 
     // Superblock update callback for checkpoint atomicity
-    void OnSuperblockUpdate(uint32_t checkpoint_seq, const ActiveBufferPos* positions,
+    void on_superblock_update(uint32_t checkpoint_seq, const ActiveBufferPos* positions,
                             uint8_t count, std::function<void(int)> on_complete);
 
     // Queued write completion handler
@@ -288,9 +288,9 @@ private:
         KvCallback cb;
         void* cb_arg;
     };
-    void OnQueuedWriteComplete(int status, QueuedWriteCompletionCtx* ctx);
+    void on_queued_write_complete(int status, QueuedWriteCompletionCtx* ctx);
 
-    // PutAsync write completion handler
+    // put_async write completion handler
     struct PutAsyncWriteCompletionCtx {
         Engine* engine;
         uint64_t key;
@@ -298,7 +298,7 @@ private:
         KvCallback cb;
         void* cb_arg;
     };
-    void OnPutAsyncWriteComplete(int status, PutAsyncWriteCompletionCtx* ctx);
+    void on_put_async_write_complete(int status, PutAsyncWriteCompletionCtx* ctx);
 
     // Blob IO completion contexts (moved from local scope for pooling)
     struct BlobWriteCtx {
@@ -320,32 +320,32 @@ private:
         iovec iovs[16];
     };
 
-    // CompactionRemoveFile blob close handler
-    void OnCompactionBlobClosed(bool close_ok, uint16_t file_id, FileInfo* file,
+    // compaction_remove_file blob close handler
+    void on_compaction_blob_closed(bool close_ok, uint16_t file_id, FileInfo* file,
                                 std::function<void(bool)> callback);
 
-    // AllocateBlobForFile blob allocated handler
-    void OnBlobAllocated(uint64_t blob_id, FileInfo* file,
+    // allocate_blob_for_file blob allocated handler
+    void on_blob_allocated(uint64_t blob_id, FileInfo* file,
                          std::function<void(bool)> callback);
 
     // AllocLog integration
-    void InitAllocLogManager();
-    void ProcessAllocLogRecovery();
-    void ReleaseDanglingBlobs();
-    static void OnCheckpointForAllocComplete(void* arg, int status);
-    void ResumeAllocationAfterCheckpoint(int status);
+    void init_alloc_log_manager();
+    void process_alloc_log_recovery();
+    void release_dangling_blobs();
+    static void on_checkpoint_for_alloc_complete(void* arg, int status);
+    void resume_allocation_after_checkpoint(int status);
 
     // RDMA slot management
-    uint32_t AllocateSlotId();
-    uint64_t GetBufferRkey(void* buffer_addr);
+    uint32_t allocate_slot_id();
+    uint64_t get_buffer_rkey(void* buffer_addr);
 
     // Backpressure resume and wait queue
-    static void OnBackpressureResume(void* arg);
-    void ProcessWaitQueue();
+    static void on_backpressure_resume(void* arg);
+    void process_wait_queue();
 
     // Buffer IO submission and completion
-    void SubmitBufferIo(AppendBuffer* buffer);
-    void OnBufferIoComplete(int status, BufferIoContext* ctx);
+    void submit_buffer_io(AppendBuffer* buffer);
+    void on_buffer_io_complete(int status, BufferIoContext* ctx);
 
     // State
     EngineState state_;
@@ -355,7 +355,7 @@ private:
     // Index
     std::unique_ptr<MemIndex> mem_index_;
 
-    // Append buffer
+    // append buffer
     std::unique_ptr<AppendBufferManager> buffer_manager_;
 
     // File management
@@ -444,7 +444,7 @@ typedef void* spdk_kv_handle;
 typedef void (*spdk_kv_cb)(void* cb_arg, int status);
 typedef void (*spdk_kv_get_cb)(void* cb_arg, int status, uint32_t actual_len);
 
-// Create options for C API
+// create options for C API
 struct spdk_kv_create_opts {
     uint64_t max_capacity;
     uint64_t data_file_size;
@@ -453,7 +453,7 @@ struct spdk_kv_create_opts {
     int force;
 };
 
-// Open options for C API
+// open options for C API
 struct spdk_kv_open_opts {
     int read_only;
     int recover;
