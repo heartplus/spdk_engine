@@ -655,8 +655,7 @@ FileInfo* Engine::AllocateNewFile() {
     // Check AllocLog capacity: if near-full, run checkpoint synchronously to reclaim
     if (alloc_log_manager_ && alloc_log_manager_->IsNearFull()) {
         bool cp_done = false;
-        StartCheckpoint(
-                [](void* arg, int) { *static_cast<bool*>(arg) = true; }, &cp_done);
+        StartCheckpoint([](void* arg, int) { *static_cast<bool*>(arg) = true; }, &cp_done);
         while (!cp_done) {
             SpdkEnv::Instance().Poll();
         }
@@ -711,8 +710,7 @@ void Engine::AllocateNewFileAsync() {
     allocating_new_file_ = true;
 
     // Check AllocLog capacity: if near-full, checkpoint first, then resume allocation
-    if (alloc_log_manager_ && alloc_log_manager_->IsNearFull() &&
-        !pending_checkpoint_for_alloc_) {
+    if (alloc_log_manager_ && alloc_log_manager_->IsNearFull() && !pending_checkpoint_for_alloc_) {
         pending_checkpoint_for_alloc_ = true;
         StartCheckpoint(OnCheckpointForAllocComplete, this);
         return;
@@ -799,6 +797,39 @@ void Engine::ProcessPendingWriteQueue() {
     }
 }
 
+void Engine::FillPendingWriteReq(PendingWriteRequest& req, uint64_t key, void* dma_buffer,
+                                 uint32_t aligned_size, uint32_t sequence, uint16_t page_count,
+                                 uint8_t tag, KvCallback cb, void* cb_arg, bool is_delete,
+                                 uint64_t old_garbage_size) {
+    req.key = key;
+    req.dma_buffer = dma_buffer;
+    req.is_segment_write = false;
+    req.aligned_size = aligned_size;
+    req.sequence = sequence;
+    req.page_count = page_count;
+    req.tag = tag;
+    req.cb = cb;
+    req.cb_arg = cb_arg;
+    req.is_delete = is_delete;
+    req.old_garbage_size = old_garbage_size;
+}
+
+void Engine::FillPendingWriteReq(PendingWriteRequest& req, uint64_t key,
+                                 const SegmentBuf& segment_buf, uint32_t aligned_size,
+                                 uint32_t sequence, uint16_t page_count, uint8_t tag, KvCallback cb,
+                                 void* cb_arg) {
+    FillPendingWriteReq(req, key, nullptr, aligned_size, sequence, page_count, tag, cb, cb_arg,
+                        false, 0);
+    req.segment_buf = segment_buf;
+    req.is_segment_write = true;
+}
+
+void Engine::FillPendingWriteReq(PendingWriteRequest& req, const WaitQueueEntry& wqe) {
+    FillPendingWriteReq(req, wqe.key, wqe.dma_buffer, wqe.aligned_size, wqe.sequence,
+                        wqe.page_count, wqe.tag, wqe.callback, wqe.cb_arg, wqe.is_delete,
+                        wqe.old_garbage_size);
+}
+
 void Engine::SubmitQueuedWrite(PendingWriteRequest& req, FileInfo* file) {
     // Assign file-specific fields
     MemIndexEntry entry;
@@ -818,25 +849,21 @@ void Engine::SubmitQueuedWrite(PendingWriteRequest& req, FileInfo* file) {
 
     pending_foreground_count_++;
 
-    auto* ctx = queued_write_ctx_pool_.Alloc(this, req.key, entry,
-                                              req.is_delete, req.old_garbage_size,
-                                              req.cb, req.cb_arg);
+    auto* ctx = queued_write_ctx_pool_.Alloc(this, req.key, entry, req.is_delete,
+                                             req.old_garbage_size, req.cb, req.cb_arg);
 
     if (req.is_segment_write) {
         // Zero-copy path: writev the caller's segment buffers directly
         SubmitBlobWritev(file, write_offset, req.segment_buf, req.aligned_size,
-                         [ctx](int status) {
-                             ctx->engine->OnQueuedWriteComplete(status, ctx);
-                         });
+                         [ctx](int status) { ctx->engine->OnQueuedWriteComplete(status, ctx); });
     } else {
         // Legacy path: single DMA buffer
         void* dma_buffer = req.dma_buffer;
-        SubmitBlobWrite(
-                file, write_offset, dma_buffer, req.aligned_size,
-                [dma_buffer, ctx](int status) {
-                    DmaAllocator::Free(dma_buffer);
-                    ctx->engine->OnQueuedWriteComplete(status, ctx);
-                });
+        SubmitBlobWrite(file, write_offset, dma_buffer, req.aligned_size,
+                        [dma_buffer, ctx](int status) {
+                            DmaAllocator::Free(dma_buffer);
+                            ctx->engine->OnQueuedWriteComplete(status, ctx);
+                        });
     }
 }
 
@@ -1193,8 +1220,7 @@ void Engine::PutAsync(uint64_t key, SegmentBuf input_buf, KvCallback cb, void* c
     }
     // CRC over remaining segments
     for (size_t i = 1; i < input_buf.cnt_; i++) {
-        crc = Crc32::Combine(crc, input_buf.buffers_[i].iov_base,
-                             input_buf.buffers_[i].iov_len);
+        crc = Crc32::Combine(crc, input_buf.buffers_[i].iov_base, input_buf.buffers_[i].iov_len);
     }
 
     // Build entry metadata at offset 256 in the first segment (zero-copy: no DMA alloc)
@@ -1228,24 +1254,13 @@ void Engine::PutAsync(uint64_t key, SegmentBuf input_buf, KvCallback cb, void* c
 
     // Get active file
     FileInfo* file = GetActiveFile();
-    bool need_new_file = !file || !file->blob_opened ||
-                         file->write_offset + total_size > config_.data_file_size;
+    bool need_new_file =
+            !file || !file->blob_opened || file->write_offset + total_size > config_.data_file_size;
 
     // If a new file is needed or one is being allocated, queue the write
     if (need_new_file || allocating_new_file_) {
         PendingWriteRequest req{};
-        req.key = key;
-        req.dma_buffer = nullptr;
-        req.segment_buf = input_buf;
-        req.is_segment_write = true;
-        req.aligned_size = total_size;
-        req.sequence = seq;
-        req.page_count = page_count;
-        req.tag = tag;
-        req.cb = cb;
-        req.cb_arg = cb_arg;
-        req.is_delete = false;
-        req.old_garbage_size = 0;
+        FillPendingWriteReq(req, key, input_buf, total_size, seq, page_count, tag, cb, cb_arg);
         pending_write_queue_.push_back(req);
 
         if (!allocating_new_file_) {
@@ -1278,9 +1293,7 @@ void Engine::PutAsync(uint64_t key, SegmentBuf input_buf, KvCallback cb, void* c
     auto* ctx = put_async_ctx_pool_.Alloc(this, key, entry, cb, cb_arg);
 
     SubmitBlobWritev(file, write_offset, input_buf, total_size,
-                     [ctx](int status) {
-                         ctx->engine->OnPutAsyncWriteComplete(status, ctx);
-                     });
+                     [ctx](int status) { ctx->engine->OnPutAsyncWriteComplete(status, ctx); });
 }
 
 void Engine::GetAsync(uint64_t key, SegmentBuf* output, KvGetCallback cb, void* cb_arg) {
@@ -1454,16 +1467,9 @@ void Engine::DeleteAsync(uint64_t key, KvCallback cb, void* cb_arg) {
         HashUtil::ComputeHash(key, &hash, &tag);
 
         PendingWriteRequest req{};
-        req.key = key;
-        req.dma_buffer = dma_buffer;
-        req.aligned_size = static_cast<uint32_t>(aligned_size);
-        req.sequence = seq;
-        req.page_count = static_cast<uint16_t>(aligned_size / kPageSize);
-        req.tag = tag;
-        req.cb = cb;
-        req.cb_arg = cb_arg;
-        req.is_delete = true;
-        req.old_garbage_size = old_size;
+        FillPendingWriteReq(req, key, dma_buffer, static_cast<uint32_t>(aligned_size), seq,
+                            static_cast<uint16_t>(aligned_size / kPageSize), tag, cb, cb_arg, true,
+                            old_size);
         pending_write_queue_.push_back(req);
 
         if (!allocating_new_file_) {
@@ -1847,8 +1853,7 @@ void Engine::SubmitBlobWrite(FileInfo* file, uint64_t offset, void* data, uint32
 }
 
 void Engine::SubmitBlobWritev(FileInfo* file, uint64_t offset, const SegmentBuf& buf,
-                              uint32_t total_length,
-                              std::function<void(int status)> callback) {
+                              uint32_t total_length, std::function<void(int status)> callback) {
     if (!file || !file->blob || !file->blob_opened) {
         if (callback) {
             callback(-1);
@@ -2590,18 +2595,8 @@ void Engine::ProcessWaitQueue() {
                              file->write_offset + wqe.aligned_size > config_.data_file_size;
 
         if (need_new_file || allocating_new_file_) {
-            // Queue via the existing PendingWriteRequest mechanism
             PendingWriteRequest req{};
-            req.key = wqe.key;
-            req.dma_buffer = wqe.dma_buffer;
-            req.aligned_size = wqe.aligned_size;
-            req.sequence = wqe.sequence;
-            req.page_count = wqe.page_count;
-            req.tag = wqe.tag;
-            req.cb = wqe.callback;
-            req.cb_arg = wqe.cb_arg;
-            req.is_delete = wqe.is_delete;
-            req.old_garbage_size = wqe.old_garbage_size;
+            FillPendingWriteReq(req, wqe);
             pending_write_queue_.push_back(req);
 
             if (!allocating_new_file_) {
@@ -3076,8 +3071,7 @@ void Engine::OnCompactionBlobClosed(bool close_ok, uint16_t file_id, FileInfo* f
     });
 }
 
-void Engine::OnBlobAllocated(uint64_t blob_id, FileInfo* file,
-                             std::function<void(bool)> callback) {
+void Engine::OnBlobAllocated(uint64_t blob_id, FileInfo* file, std::function<void(bool)> callback) {
     if (blob_id == SPDK_BLOBID_INVALID) {
         if (callback) {
             callback(false);
@@ -3091,18 +3085,18 @@ void Engine::OnBlobAllocated(uint64_t blob_id, FileInfo* file,
     // This ensures crash consistency: if we crash after AllocLog but before
     // DataFileHeader, recovery can identify this blob via AllocLog.
     if (alloc_log_manager_ && alloc_log_manager_->IsInitialized()) {
-        alloc_log_manager_->WriteEntry(
-                blob_id, file->file_id, config_.data_file_size,
-                [this, file, callback](int status) {
-                    if (status != 0) {
-                        if (callback) {
-                            callback(false);
-                        }
-                        return;
-                    }
-                    // AllocLog persisted, now open blob and write DataFileHeader
-                    OpenBlobForFile(file, callback);
-                });
+        alloc_log_manager_->WriteEntry(blob_id, file->file_id, config_.data_file_size,
+                                       [this, file, callback](int status) {
+                                           if (status != 0) {
+                                               if (callback) {
+                                                   callback(false);
+                                               }
+                                               return;
+                                           }
+                                           // AllocLog persisted, now open blob and write
+                                           // DataFileHeader
+                                           OpenBlobForFile(file, callback);
+                                       });
     } else {
         // No AllocLog manager: legacy path
         OpenBlobForFile(file, callback);
@@ -3220,7 +3214,8 @@ static void CApiGetAsyncCallback(void* arg, int status, uint32_t actual_len) {
             // Free DMA buffer
             DmaAllocator::Free(ctx->dma_buffer);
             if (ctx->user_cb) {
-                ctx->user_cb(ctx->user_cb_arg, static_cast<int>(KvError::kValueTooLarge), actual_len);
+                ctx->user_cb(ctx->user_cb_arg, static_cast<int>(KvError::kValueTooLarge),
+                             actual_len);
             }
             g_capi_get_ctx_pool.Free(ctx);
             return;
@@ -3254,7 +3249,8 @@ void spdk_kv_get_async(spdk_kv_handle handle, uint64_t key, void* value_buf, uin
 
     // Allocate DMA buffer: user buffer size + 512 byte header, aligned up to 4KB
     // Use maximum of 16 pages (64KB) as upper bound for SegmentBuf capacity
-    uint32_t required_size = AlignUp(static_cast<uint64_t>(buf_len) + kSegmentDataOffset, kPageSize);
+    uint32_t required_size =
+            AlignUp(static_cast<uint64_t>(buf_len) + kSegmentDataOffset, kPageSize);
     uint32_t max_size = 16 * kPageSize;  // SegmentBuf can hold at most 16 pages
     uint32_t alloc_size = std::min(required_size, max_size);
 

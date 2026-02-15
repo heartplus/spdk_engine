@@ -264,6 +264,16 @@ private:
     void ProcessPendingWriteQueue();
     void SubmitQueuedWrite(PendingWriteRequest& req, FileInfo* file);
 
+    // Fill PendingWriteRequest helpers
+    void FillPendingWriteReq(PendingWriteRequest& req, uint64_t key, void* dma_buffer,
+                             uint32_t aligned_size, uint32_t sequence, uint16_t page_count,
+                             uint8_t tag, KvCallback cb, void* cb_arg, bool is_delete,
+                             uint64_t old_garbage_size);
+    void FillPendingWriteReq(PendingWriteRequest& req, uint64_t key, const SegmentBuf& segment_buf,
+                             uint32_t aligned_size, uint32_t sequence, uint16_t page_count,
+                             uint8_t tag, KvCallback cb, void* cb_arg);
+    void FillPendingWriteReq(PendingWriteRequest& req, const WaitQueueEntry& wqe);
+
     // Superblock update callback for checkpoint atomicity
     void OnSuperblockUpdate(uint32_t checkpoint_seq, const ActiveBufferPos* positions,
                             uint8_t count, std::function<void(int)> on_complete);
